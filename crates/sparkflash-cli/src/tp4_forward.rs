@@ -63,6 +63,10 @@ mod rows;
 // Pure host code, built (and tested) without the device too; only the device path uses it.
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 mod sample;
+// Who loses a lane, and whether a sequence counts as running, does not need the device.
+// `batch` calls the same loops; the tests run them with a small budget.
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) mod lane_account;
 #[cfg(feature = "cuda")]
 mod spec;
 #[cfg(feature = "cuda")]
