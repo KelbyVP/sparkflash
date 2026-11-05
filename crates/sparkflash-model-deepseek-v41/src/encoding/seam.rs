@@ -597,6 +597,18 @@ fn resolve_thinking(kwargs: &Map<String, Value>) -> bool {
     thinking || enable
 }
 
+/// Score one `reasoning_effort` value with the chat-template seam parser.
+///
+/// `None` is a missing value. The API cross-check calls this so the seam and
+/// `effort_for_name` cannot drift.
+pub fn parse_template_reasoning_effort(effort: Option<&Value>) -> Result<u8, TokenizerSeamError> {
+    let mut kwargs = Map::new();
+    if let Some(value) = effort {
+        kwargs.insert("reasoning_effort".to_owned(), value.clone());
+    }
+    Ok(resolve_effort(&kwargs, true)?.score)
+}
+
 /// Effort resolution and validation of deepseek_v41.py.
 ///
 /// "none" disables thinking and leaves the budget at the default "high" (the

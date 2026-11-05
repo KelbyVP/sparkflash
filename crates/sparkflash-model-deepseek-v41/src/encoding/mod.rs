@@ -37,7 +37,7 @@ pub use case::{
 pub use render::{DEFAULT_EFFORT_SCORE, render_single_message};
 pub use seam::{
     TEMPLATE_EFFORT_DEFAULT, TEMPLATE_EFFORT_HIGH, TEMPLATE_EFFORT_LOW, TEMPLATE_EFFORT_MAX,
-    TEMPLATE_EFFORT_XHIGH, TokenizerSeam, TokenizerSeamError,
+    TEMPLATE_EFFORT_XHIGH, TokenizerSeam, TokenizerSeamError, parse_template_reasoning_effort,
 };
 
 use case::process_image_messages_lenient;

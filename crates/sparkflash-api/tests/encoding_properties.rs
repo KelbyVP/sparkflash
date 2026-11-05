@@ -266,3 +266,33 @@ fn synthetic_case_rendering_is_deterministic_and_effort_retargets() {
         retargeted
     );
 }
+
+#[test]
+fn rendered_thinking_prompt_uses_the_1017_checkpoint_effort() {
+    let encoding = SparkV41Encoding::default();
+    let absent = parse_cases(&json!({
+        "thinking_mode": "thinking",
+        "messages": [{ "role": "user", "content": "question" }]
+    }))
+    .expect("parse");
+    let prompt = encoding
+        .render_case(&absent[0], None)
+        .expect("render")
+        .prompt;
+    assert!(
+        prompt.contains("Reasoning Effort: 75"),
+        "absent effort must render the checkpoint default: {prompt}"
+    );
+
+    let low = parse_cases(&json!({
+        "thinking_mode": "thinking",
+        "reasoning_effort": "low",
+        "messages": [{ "role": "user", "content": "question" }]
+    }))
+    .expect("parse");
+    let prompt = encoding.render_case(&low[0], None).expect("render").prompt;
+    assert!(
+        prompt.contains("Reasoning Effort: 50"),
+        "low must render the checkpoint score: {prompt}"
+    );
+}

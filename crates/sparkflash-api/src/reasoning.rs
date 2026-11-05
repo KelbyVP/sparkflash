@@ -242,7 +242,11 @@ fn render(value: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use sparkflash_model_deepseek_v41::encoding::resolve_reasoning_effort;
+    use sparkflash_model_deepseek_v41::encoding::{
+        DEFAULT_EFFORT_SCORE, TEMPLATE_EFFORT_DEFAULT, TEMPLATE_EFFORT_HIGH, TEMPLATE_EFFORT_LOW,
+        TEMPLATE_EFFORT_MAX, TEMPLATE_EFFORT_XHIGH, parse_template_reasoning_effort,
+        resolve_reasoning_effort,
+    };
 
     #[test]
     fn absent_and_null_effort_default_to_50() {
@@ -308,6 +312,39 @@ mod tests {
         assert_eq!(default.score, Some(EFFORT_DEFAULT));
         assert_eq!(default.error, None);
         assert_eq!(resolve_reasoning_effort(None, false).score, None);
+        // The render default and the seam parser are the same table, not a second copy.
+        assert_eq!(DEFAULT_EFFORT_SCORE, EFFORT_DEFAULT);
+        assert_eq!(TEMPLATE_EFFORT_DEFAULT, EFFORT_DEFAULT);
+        assert_eq!(TEMPLATE_EFFORT_LOW, EFFORT_LOW);
+        assert_eq!(TEMPLATE_EFFORT_HIGH, EFFORT_HIGH);
+        assert_eq!(TEMPLATE_EFFORT_XHIGH, EFFORT_XHIGH);
+        assert_eq!(TEMPLATE_EFFORT_MAX, EFFORT_MAX_SCORE);
+        for name in ["low", "minimal", "medium", "high", "xhigh", "max"] {
+            let seam = parse_template_reasoning_effort(Some(&json!(name)))
+                .unwrap_or_else(|error| panic!("seam parser {name}: {error}"));
+            assert_eq!(Some(seam), effort_for_name(name), "seam parser {name}");
+        }
+        assert_eq!(
+            parse_template_reasoning_effort(None).expect("missing effort"),
+            parse_effort(None)
+                .expect("missing effort")
+                .expect("a score")
+        );
+    }
+
+    #[test]
+    fn effort_for_name_matches_the_1017_checkpoint() {
+        assert_eq!(effort_for_name("low"), Some(50));
+        assert_eq!(effort_for_name("minimal"), Some(50));
+        assert_eq!(effort_for_name("high"), Some(75));
+        assert_eq!(effort_for_name("medium"), Some(75));
+        assert_eq!(effort_for_name("xhigh"), Some(75));
+        assert_eq!(effort_for_name("max"), Some(100));
+    }
+
+    #[test]
+    fn parse_effort_absent_matches_the_1017_checkpoint() {
+        assert_eq!(parse_effort(None).expect("absent effort"), Some(75));
     }
 
     #[test]
