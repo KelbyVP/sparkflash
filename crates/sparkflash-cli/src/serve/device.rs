@@ -67,7 +67,7 @@ use super::{
 };
 use crate::device_link::{DeviceFinish, DeviceJob, DeviceLink, DeviceOutcome, DeviceTick};
 use crate::tp4_forward::lane_account::{
-    count_eviction, count_finish, count_grant, count_join, count_preemption,
+    count_eviction, count_finish, count_grant, count_preemption,
 };
 use sparkflash_api::VisionImage;
 use sparkflash_model::vision::{ImageGrid as Grid, ImageSpan};
@@ -984,10 +984,8 @@ impl HubLink {
         let seq = self.next_seq;
         self.next_seq += 1;
         admit.push((seq, pending.job.clone()));
-        let mut live = Live::new(pending);
         // No lane yet. `place` grants one on a later tick; until then the request stays waiting.
-        count_join(&self.metrics, &mut live.on_lane);
-        self.live.insert(seq, live);
+        self.live.insert(seq, Live::new(pending));
     }
 
     /// Decides a tick and broadcasts it: `idle` blocks for a request (None: the driver is gone

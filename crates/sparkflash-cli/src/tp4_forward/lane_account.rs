@@ -61,7 +61,7 @@ pub(crate) fn pick_lru(lanes: impl Iterator<Item = (usize, u64)>) -> Option<usiz
         .map(|(index, _)| index)
 }
 
-/// Least recently used free lane, then the higher index. That is the order `Batch::place`
+/// Least recently used free lane, then the lower index. That is the order `Batch::place`
 /// uses once the shared prefix does not decide. The test pool has no prefix cache, so this
 /// is the whole choice; `place` itself stays on the device.
 #[cfg(test)]
@@ -69,12 +69,6 @@ fn pick_free_lane(free: &[(usize, u64)]) -> Option<usize> {
     free.iter()
         .max_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)))
         .map(|(lane, _)| *lane)
-}
-
-/// A sequence joined the scheduler. It has no lane yet, so it stays on the waiting gauge.
-pub(crate) fn count_join(_metrics: &Metrics, _on_lane: &mut bool) {
-    // Admission is not a lane. The waiting gauge already counted the request when it was
-    // enqueued; moving it to running here is what made lane-less sequences look busy.
 }
 
 /// A sequence was given a lane: it stops waiting and starts running.
@@ -220,6 +214,9 @@ struct Seat {
 struct SchedSeq {
     id: u64,
     lane: Option<usize>,
+    /// Where the sequence had got to. Cleared when it is preempted, so a log that reads
+    /// it afterwards names position 0.
+    pos: usize,
     done: bool,
     on_lane: bool,
 }
@@ -232,6 +229,9 @@ struct LaneSched {
     seqs: Vec<SchedSeq>,
     budget: usize,
     metrics: Arc<Metrics>,
+    /// One line per preemption, from the id, position, and pool memory sampled before the
+    /// seat was cleared.
+    preemption_lines: Vec<String>,
 }
 
 #[cfg(test)]
@@ -248,6 +248,7 @@ impl LaneSched {
             seqs: Vec::new(),
             budget,
             metrics,
+            preemption_lines: Vec::new(),
         }
     }
 
@@ -261,13 +262,17 @@ impl LaneSched {
         self.seqs.push(SchedSeq {
             id,
             lane: None,
+            pos: 0,
             done: false,
             on_lane: false,
         });
-        let index = self.seqs.len() - 1;
-        let metrics = Arc::clone(&self.metrics);
-        count_join(&metrics, &mut self.seqs[index].on_lane);
+        // Still waiting until `place` grants a lane.
         self.place();
+    }
+
+    fn set_pos(&mut self, id: u64, pos: usize) {
+        let index = self.index_of(id);
+        self.seqs[index].pos = pos;
     }
 
     /// Gives free lanes to waiting sequences, oldest first.
@@ -406,12 +411,21 @@ impl RoomOps for LaneSched {
     }
 
     fn preempt_at(&mut self, index: usize) -> Result<(), String> {
-        let Some(lane) = self.seqs[index].lane.take() else {
+        let Some(lane) = self.seqs[index].lane else {
             return Ok(());
         };
+        // The line has to name the sequence where it had got to, and the pool as it
+        // stands. Both are gone once the seat is cleared and this lane's chunks return.
+        let id = self.seqs[index].id;
+        let position = self.seqs[index].pos;
+        let held_chunks: usize = self.lanes.iter().map(|seat| seat.backed).sum();
+        let line = preemption_line(id, position, held_chunks << 20, self.budget << 20);
+        self.seqs[index].lane = None;
+        self.seqs[index].pos = 0;
         self.lanes[lane].seq = None;
         self.lanes[lane].backed = 0;
         self.lanes[lane].used = self.lanes[lane].used.saturating_add(1);
+        self.preemption_lines.push(line);
         Ok(())
     }
 
@@ -477,10 +491,36 @@ mod tests {
 
         sched.admit(3);
         sched.grow_id(3, 2).expect("fills the budget again");
+        sched.set_pos(1, 40);
+        sched.set_pos(3, 1000);
+        let victim = sched
+            .seqs
+            .iter()
+            .rposition(|seq| !seq.done && seq.lane.is_some())
+            .expect("a running sequence");
+        let id = sched.seqs[victim].id;
+        let position = sched.seqs[victim].pos;
+        let held: usize = sched.lanes.iter().map(|seat| seat.backed).sum();
+        let budget = sched.budget;
+        assert_ne!(position, 0);
         let before = sched.metrics().render();
         let sum = sample(&before, "sparkflash_num_requests_running")
             + sample(&before, "sparkflash_num_requests_waiting");
         assert!(sched.make_room_id(1, 8).expect("preempt the newest"));
+        assert_eq!(
+            sched.preemption_lines.len(),
+            1,
+            "one line per preemption: {:?}",
+            sched.preemption_lines
+        );
+        let line = &sched.preemption_lines[0];
+        assert!(
+            line.contains(&format!("sequence {id}"))
+                && line.contains(&format!("position {position}"))
+                && line.contains(&format!("{held} MiB held"))
+                && line.contains(&format!("{budget} MiB budget")),
+            "{line}"
+        );
         let text = sched.metrics().render();
         assert_eq!(
             sample(&text, "sparkflash_preemptions_total"),

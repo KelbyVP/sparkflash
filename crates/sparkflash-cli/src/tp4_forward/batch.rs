@@ -479,7 +479,6 @@ pub(super) struct Batch<'b, 'a, 'r> {
     trace: bool,
     /// The ms the running tick's prefill waited for Engram reads, for the trace.
     read_wait_ms: f64,
-    preemptions: usize,
     /// What this tick did to lanes, for the metrics. The scheduler does not read it.
     notes: Vec<lane_account::LaneNote>,
 }
@@ -545,7 +544,6 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
             trace: inputs.rank == 0
                 && std::env::var("SPARKFLASH_BATCH_TRACE").as_deref() == Ok("1"),
             read_wait_ms: 0.0,
-            preemptions: 0,
             notes: Vec::new(),
         })
     }
@@ -1408,7 +1406,6 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         // `forget` gives this lane's chunks back, so the held figure has to be read first.
         let (held, budget) = self.device.lane_memory();
         self.forget(lane)?;
-        self.preemptions += 1;
         if self.inputs.rank == 0 {
             eprintln!(
                 "{}",
