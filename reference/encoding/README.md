@@ -17,8 +17,8 @@ Three prompt-format changes distinguish V4.1 from V4:
 2. **Reasoning effort is a numeric budget (1–100).** The effort prefix is
    rendered as `Reasoning Effort: {budget} (range 1-100, ...)` rather than the
    verbose natural-language descriptions used in V4. String aliases map as
-   follows: `"low"` → 25, `"high"` → 50, `"xhigh"` → 75, `"max"` → 100. The
-   default is `"high"` (50). The effort prefix is only rendered in
+   follows: `"low"` → 50, `"high"` → 75, `"max"` → 100. The
+   default is `"high"` (75). The effort prefix is only rendered in
    `thinking_mode="thinking"` and only at the beginning of the conversation
    (index 0).
 
@@ -39,7 +39,7 @@ messages = [
 prompt, media = encode_messages(
     messages,
     thinking_mode="thinking",
-    reasoning_effort=75,           # integer 1–100, or "low"/"high"/"xhigh"/"max"
+    reasoning_effort=75,           # integer 1–100, or "low"/"high"/"max"
     return_multi_modal_data=True,
 )
 # prompt:
@@ -227,8 +227,8 @@ Tool execution results are wrapped in `<tool_result>` tags within user messages:
 
 ### Reasoning effort
 
-Pass `reasoning_effort` as an integer in `[1, 100]` or as one of `"low"` (25),
-`"high"` (50), `"xhigh"` (75), or `"max"` (100). The default is `"high"` (50).
+Pass `reasoning_effort` as an integer in `[1, 100]` or as one of `"low"` (50),
+`"high"` (75), or `"max"` (100). The default is `"high"` (75).
 The setting only affects `thinking_mode="thinking"` and is only rendered at the
 start of the conversation (index 0). Intermediate values may be used to elicit
 interpolated reasoning behavior.

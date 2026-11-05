@@ -878,7 +878,7 @@ async fn anthropic_thinking_disabled_reaches_the_prompt_and_top_k_reaches_the_en
 async fn anthropic_adaptive_thinking_turns_thinking_on_and_carries_the_effort() {
     // Claude Code sends {"thinking": {"type": "adaptive", "display": "omitted"}} with
     // {"output_config": {"effort": "high"}}. The template has one switch, so adaptive is on, and
-    // the effort becomes the template's reasoning_effort (high is the 50-level of its table).
+    // the effort becomes the template's reasoning_effort (high is 75 on the 1017 table).
     let recorded = recorded_app(
         MockEngine::new(MODEL)
             .with_capabilities(Capabilities::ALL)
@@ -905,7 +905,7 @@ async fn anthropic_adaptive_thinking_turns_thinking_on_and_carries_the_effort() 
     assert_eq!(captured[0]["reasoning_effort"], "high");
     let engine_request = requests.lock().expect("engine log")[0].clone();
     assert!(engine_request.thinking);
-    assert_eq!(engine_request.reasoning_effort, Some(50));
+    assert_eq!(engine_request.reasoning_effort, Some(75));
 }
 
 #[tokio::test]

@@ -25,9 +25,9 @@
 //! 3. `enable_thinking` (bool)
 //! 4. the default: thinking on.
 //!
-//! The numeric table is the protocol-level default (low/minimal 25, medium/high 50,
-//! xhigh 75, max 100, absent 50). A model pack may expose the same aliases through its
-//! encoding surface; a test pins the two tables against each other so they cannot drift.
+//! The numeric table is the 1017 checkpoint encoder (blob `3c7c357d`, DECISIONS.md D66):
+//! low/minimal 50, high/medium/xhigh 75, max 100, and an absent value is high (75).
+//! A test pins the API table, the render default and the seam parser together.
 
 use serde_json::Value;
 use thiserror::Error;
@@ -38,16 +38,15 @@ pub const EFFORT_MIN: u8 = 1;
 pub const EFFORT_MAX: u8 = 100;
 /// Score used when effort is absent, null or "high".
 ///
-/// This is the released V4.1 encoder's default (`high`), and the same 25/50/75/100
-/// table used by the prompt seam; recipe 0.2's separate 50/75/75/100 table is not
-/// an API default. See docs/DECISIONS.md (task-63 effort-table consolidation).
-pub const EFFORT_DEFAULT: u8 = 50;
+/// Blob `3c7c357d` maps an absent value to `high` (75). `medium` is the same
+/// score. See DECISIONS.md D66, which amends D46's 25/50/75/100 table.
+pub const EFFORT_DEFAULT: u8 = 75;
 /// Score for "low" and "minimal".
-pub const EFFORT_LOW: u8 = 25;
-/// Score for "medium" (an alias of the default high level).
+pub const EFFORT_LOW: u8 = 50;
+/// Score for "medium" (an alias of high).
 pub const EFFORT_MEDIUM: u8 = EFFORT_DEFAULT;
 /// Score for "high".
-pub const EFFORT_HIGH: u8 = 50;
+pub const EFFORT_HIGH: u8 = 75;
 /// Score for "xhigh".
 pub const EFFORT_XHIGH: u8 = 75;
 /// Score for "max".
@@ -249,19 +248,19 @@ mod tests {
     };
 
     #[test]
-    fn absent_and_null_effort_default_to_50() {
+    fn absent_and_null_effort_default_to_75() {
         assert_eq!(
             resolve(&json!({})).expect("empty body"),
             ReasoningSpec {
                 thinking: true,
-                effort: Some(50)
+                effort: Some(75)
             }
         );
         assert_eq!(
             resolve(&json!({"reasoning_effort": null})).expect("null effort"),
             ReasoningSpec {
                 thinking: true,
-                effort: Some(50)
+                effort: Some(75)
             }
         );
     }
@@ -350,17 +349,17 @@ mod tests {
     #[test]
     fn every_named_effort_maps_to_the_documented_score() {
         for (name, score) in [
-            ("low", 25),
-            ("minimal", 25),
-            ("medium", 50),
-            ("high", 50),
+            ("low", 50),
+            ("minimal", 50),
+            ("medium", 75),
+            ("high", 75),
             ("xhigh", 75),
             ("max", 100),
         ] {
             let spec = resolve(&json!({"reasoning_effort": name})).expect("known effort");
             assert_eq!(spec.effort, Some(score), "effort {name}");
         }
-        assert_eq!(effort_for_name("LOW"), Some(25));
+        assert_eq!(effort_for_name("LOW"), Some(50));
         assert_eq!(effort_for_name(" Max "), Some(100));
         assert_eq!(effort_for_name("extreme"), None);
     }
@@ -418,7 +417,7 @@ mod tests {
             resolve(&json!({"enable_thinking": true}))
                 .expect("on")
                 .effort,
-            Some(50)
+            Some(75)
         );
         assert!(resolve(&json!({"enable_thinking": "yes"})).is_err());
     }
@@ -447,7 +446,7 @@ mod tests {
             on,
             ReasoningSpec {
                 thinking: true,
-                effort: Some(50)
+                effort: Some(75)
             }
         );
 
@@ -473,7 +472,7 @@ mod tests {
             on_string,
             ReasoningSpec {
                 thinking: true,
-                effort: Some(50)
+                effort: Some(75)
             }
         );
     }
@@ -500,7 +499,7 @@ mod tests {
             on,
             ReasoningSpec {
                 thinking: true,
-                effort: Some(50)
+                effort: Some(75)
             }
         );
     }

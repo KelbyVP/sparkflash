@@ -47,8 +47,10 @@ pub const TOOL_CALL_TAG_NAME: &str = " invoke";
 /// V4.1 tool parameter tag name (leading space is significant).
 pub const TOOL_PARAMETER_TAG_NAME: &str = " parameter";
 
-/// Default numeric budget the reference encoder uses when none is requested.
-pub const DEFAULT_EFFORT_SCORE: u8 = 50;
+/// Default numeric budget when the request names no effort.
+///
+/// The 1017 checkpoint encoder's default is `high` (75). See DECISIONS.md D66.
+pub const DEFAULT_EFFORT_SCORE: u8 = 75;
 
 const TOOLS_TEMPLATE: &str = r#"## Tools
 

@@ -183,7 +183,7 @@ fn flat_special_token_table_is_pinned() {
             "user",
             "what is <｜User｜> and </think>?",
             &[
-                0, 128799, 77666, 288, 9504, 482, 28, 223, 1328, 343, 16801, 223, 19, 15, 1457, 14,
+                0, 128799, 77666, 288, 9504, 482, 28, 223, 2402, 343, 16801, 223, 19, 15, 1457, 14,
                 270, 4077, 270, 1990, 14, 270, 850, 15146, 270, 22805, 868, 128803, 9602, 344, 223,
                 128803, 305, 223, 128822, 33, 128804, 128821,
             ],
@@ -192,7 +192,7 @@ fn flat_special_token_table_is_pinned() {
             "bos",
             "hi<｜begin▁of▁sentence｜>there",
             &[
-                0, 128799, 77666, 288, 9504, 482, 28, 223, 1328, 343, 16801, 223, 19, 15, 1457, 14,
+                0, 128799, 77666, 288, 9504, 482, 28, 223, 2402, 343, 16801, 223, 19, 15, 1457, 14,
                 270, 4077, 270, 1990, 14, 270, 850, 15146, 270, 22805, 868, 128803, 6366, 0, 21908,
                 128804, 128821,
             ],
@@ -201,7 +201,7 @@ fn flat_special_token_table_is_pinned() {
             "dsml",
             "explain ｜DSML｜ invoke",
             &[
-                0, 128799, 77666, 288, 9504, 482, 28, 223, 1328, 343, 16801, 223, 19, 15, 1457, 14,
+                0, 128799, 77666, 288, 9504, 482, 28, 223, 2402, 343, 16801, 223, 19, 15, 1457, 14,
                 270, 4077, 270, 1990, 14, 270, 850, 15146, 270, 22805, 868, 128803, 26028, 499,
                 223, 128825, 34756, 128804, 128821,
             ],
@@ -232,8 +232,8 @@ fn chat_template_ids_match_the_released_server() {
 
 #[test]
 fn chat_template_defaults_match_the_released_server() {
-    // vLLM defaults: thinking on, budget "high" (50). The released tokenizer wrapper sets
-    // thinking=True and effort="high" when the request says nothing.
+    // vLLM defaults: thinking on, budget "high" (75 on the 1017 table). The released
+    // tokenizer wrapper sets thinking=True and effort="high" when the request says nothing.
     let seam = seam();
     let default_ids = seam
         .encode_chat(&json!({"messages": [{"role": "user", "content": "Hello"}]}))
@@ -269,12 +269,12 @@ fn chat_template_refuses_unknown_roles_loudly() {
 
 #[test]
 fn chat_template_refuses_unsupported_effort_loudly() {
-    // "medium" is accepted by the OpenAI surface but is not one of the encoder's aliases; the
-    // released server raises this exact message from deepseek_v41.py.
+    // Unknown spellings are still refused with the released server's text. `medium` and
+    // `minimal` are accepted (D66) and are pinned with the seam parser, not here.
     let error = seam()
         .encode_chat(&json!({
             "messages": [{"role": "user", "content": "hi"}],
-            "reasoning_effort": "medium"
+            "reasoning_effort": "bogus"
         }))
         .expect_err("unsupported effort must be refused");
     assert!(
@@ -520,13 +520,15 @@ async fn chat_invalid_role_is_a_400_with_the_vllm_text() {
 
 #[tokio::test]
 async fn chat_unsupported_effort_is_a_400_with_the_vllm_text() {
+    // A top-level unknown name is refused by the API table before the template runs.
+    // The kwargs spelling is what the seam still refuses, with the released server's text.
     let (status, body) = post(
         app_with_seam(),
         "/v1/chat/completions",
         json!({
             "model": MODEL,
             "messages": [{"role": "user", "content": "hi"}],
-            "reasoning_effort": "medium"
+            "chat_template_kwargs": {"reasoning_effort": "bogus"}
         }),
     )
     .await;

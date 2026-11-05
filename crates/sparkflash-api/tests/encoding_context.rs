@@ -29,8 +29,8 @@ const USER: &str = "<｜User｜>";
 const ASSISTANT: &str = "<｜Assistant｜>";
 const THINK_START: &str = "<think>";
 
-const EFFORT_50: &str =
-    "Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n";
+const EFFORT_75: &str =
+    "Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n";
 
 /// P1: chat turn with a two-message context.
 const P1: &str = "<｜User｜>second question<｜Assistant｜></think>";
@@ -38,7 +38,7 @@ const P1: &str = "<｜User｜>second question<｜Assistant｜></think>";
 const P2: &str = "<｜User｜>second question<｜Assistant｜><think>";
 /// P4: no context, thinking, default effort.
 fn p4() -> String {
-    format!("{BOS}{SYSTEM}{EFFORT_50}{USER}second question{ASSISTANT}{THINK_START}")
+    format!("{BOS}{SYSTEM}{EFFORT_75}{USER}second question{ASSISTANT}{THINK_START}")
 }
 
 fn render(case_json: Value) -> String {

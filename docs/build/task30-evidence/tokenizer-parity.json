@@ -1,7 +1,7 @@
 {
  "schema": "task-30 tokenizer seam parity evidence v1",
  "recorded_utc": "2026-10-19",
- "method": "Offline tokenizer run of the released image's own tokenizer stack: transformers AutoTokenizer loaded from the served snapshot's tokenizer.json (CPU only; no model weights, no GPU, no vLLM server), plus the released image's vllm/tokenizers/deepseek_v41_encoding.py for chat prompt text. Ids are tokenizer.encode(text, add_special_tokens=False), exactly what vllm/tokenizers/deepseek_v41.py does for chat; for raw completion text the same call equals encode(text, add_special_tokens=True) because this tokenizer's post_processor is ByteLevel.",
+ "method": "Offline tokenizer run of the released image's own tokenizer stack: transformers AutoTokenizer loaded from the served snapshot's tokenizer.json (CPU only; no model weights, no GPU, no vLLM server), plus the released image's vllm/tokenizers/deepseek_v41_encoding.py for chat prompt text. Ids are tokenizer.encode(text, add_special_tokens=False), exactly what vllm/tokenizers/deepseek_v41.py does for chat; for raw completion text the same call equals encode(text, add_special_tokens=True) because this tokenizer's post_processor is ByteLevel. D66 re-tokenized the prompts whose reasoning-effort digits changed (default high 50->75, low 25->50) with the vendored tokenizer.json. Other prompts are the 2026-10-19 recording.",
  "served_root": "/root/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4.1-Flash-1017/snapshots/1bae0e1088993b9b82de08f59de5be5a34e42170",
  "served_root_host_path_node80": "/home/user/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4.1-Flash-1017/snapshots/1bae0e1088993b9b82de08f59de5be5a34e42170",
  "served_root_source": "start-vllm.log lines 443/446/471 (launch recipe of window 2026-10-18)",
@@ -20,7 +20,7 @@
  "vllm_renderer": "DeepseekV4Renderer (vllm/renderers/registry.py maps deepseek_v41 -> deepseek_v4.DeepseekV4Renderer)",
  "vllm_tokenizer_wrapper_sha256": "d6e9cbce7c5f127819452fa5d03dd4f22ad9f136dd202a54b5b31fe42402cae2",
  "vllm_encoding_copy_sha256": "fa501415211cd0e0c9f06ee6033c5466046e293b6153bca6200b70695b88fc73",
- "repo_reference_encoding_sha256": "f64a67e5680a5621b9320585a9684967cd5c75a9b82e19d914cbc02845d72cab",
+ "repo_reference_encoding_sha256": "13231c592e958fb39e2af6001dae69d90e7a36b265702b9b390236fb387599e2",
  "fixture_parity_check": "The image's vllm/tokenizers/deepseek_v41_encoding.py reproduces reference/encoding/tests/test_output_1..5.txt byte-for-byte when fed the reference fixtures with the wrapper's message normalisation (checked offline on 2026-10-19); the Rust port is golden-tested against the same files.",
  "tokenizer_class_reported_by_transformers": "TokenizersBackend",
  "vocab_size": 128000,
@@ -162,7 +162,7 @@
  "chat": [
   {
    "name": "chat_user_hello_default",
-   "prompt_sha256": "cbea02f6104f3fab1856d5239acb74566f208efbe5bce8aae68cea171ed12a15",
+   "prompt_sha256": "07aa7538f5ad045b5cbd3576b12bf878c2f6f5ad7b6dfdda051b21980f3324e5",
    "prompt_len_chars": 155,
    "ids": [
     0,
@@ -173,7 +173,7 @@
     482,
     28,
     223,
-    1328,
+    2402,
     343,
     16801,
     223,
@@ -214,7 +214,7 @@
   },
   {
    "name": "chat_system_user_low",
-   "prompt_sha256": "2f1a53aba6436c571b9102b340f4ebe611325e75f9ab2b0903a52110651cd14a",
+   "prompt_sha256": "2792090307cab9d62c29fccdf04ad4760d341695e84226c57cc6ae89b209c70b",
    "prompt_len_chars": 168,
    "ids": [
     0,
@@ -225,7 +225,7 @@
     482,
     28,
     223,
-    1069,
+    1328,
     343,
     16801,
     223,
@@ -257,7 +257,7 @@
   },
   {
    "name": "chat_user_tools",
-   "prompt_sha256": "2e9091b858f1b52d35d905f652b5780ee6f31230369276d51f838ec656f51d72",
+   "prompt_sha256": "fa498890b10d57da2b79367526899a979aeddccf8c6c6c30d7374a7738ba6533",
    "prompt_len_chars": 1281,
    "ids": [
     0,
@@ -268,7 +268,7 @@
     482,
     28,
     223,
-    1328,
+    2402,
     343,
     16801,
     223,
@@ -557,7 +557,7 @@
   },
   {
    "name": "chat_user_blocks",
-   "prompt_sha256": "a8ad391edbe5d736284cd75f8b22b61e8f9d6747b2bbfdfc1502298337bad506",
+   "prompt_sha256": "e4edf4b21559ddf72e30a09c0f4c52bdde76461f7a9e2cce617719cea2ce254a",
    "prompt_len_chars": 163,
    "ids": [
     0,
@@ -568,7 +568,7 @@
     482,
     28,
     223,
-    1328,
+    2402,
     343,
     16801,
     223,
@@ -598,7 +598,7 @@
   },
   {
    "name": "chat_multi_turn",
-   "prompt_sha256": "f1336fc516c2c6bc63dd755e7af551409bf3a30f1fece0d40a088059a3a96135",
+   "prompt_sha256": "88dbc77451dd1e0db77395e120f0e4abfc9bf5ead938b405a274eb1bfe4c4bc4",
    "prompt_len_chars": 219,
    "ids": [
     0,
@@ -609,7 +609,7 @@
     482,
     28,
     223,
-    1328,
+    2402,
     343,
     16801,
     223,
@@ -656,7 +656,7 @@
  "fixtures": [
   {
    "case": 1,
-   "prompt_sha256": "1e4f3396423135e120a30120322d2d5e59343e83e1bcb23267b14e1ecd14231b",
+   "prompt_sha256": "91f79aa955717b414a82aabfb38bcd83ab5a998bd47db89d2a26338e8d3de550",
    "n_ids": 548,
    "ids": [
     0,
@@ -667,7 +667,7 @@
     482,
     28,
     223,
-    1328,
+    2402,
     343,
     16801,
     223,
