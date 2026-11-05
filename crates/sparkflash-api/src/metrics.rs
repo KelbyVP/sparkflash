@@ -57,9 +57,15 @@ pub struct Metrics {
     requests_total: IntCounter,
     prompt_tokens_total: IntCounter,
     /// Requests currently executing (admitted to a batch slot or the serial run loop).
+    /// On the device, a sequence counts once it holds a lane.
     num_requests_running: IntGauge,
     /// Requests accepted by the driver and queued, not yet admitted for execution.
+    /// On the device, a sequence with no lane is waiting, including after a preemption.
     num_requests_waiting: IntGauge,
+    /// Idle lanes freed so a growing lane could stay inside the lane-memory budget.
+    lane_evictions_total: IntCounter,
+    /// Running sequences preempted for the same reason.
+    preemptions_total: IntCounter,
     /// Generated token ids, counted as each token is generated.
     generation_tokens_total: IntCounter,
     /// Seconds from engine-queue admission to the first generated token.
@@ -214,12 +220,22 @@ impl Metrics {
         .expect("static metric descriptor");
         let num_requests_running = IntGauge::new(
             "sparkflash_num_requests_running",
-            "Number of requests currently executing (vLLM vllm:num_requests_running semantics)",
+            "Number of requests currently executing (vLLM vllm:num_requests_running semantics). A device sequence counts once it holds a lane",
         )
         .expect("static metric descriptor");
         let num_requests_waiting = IntGauge::new(
             "sparkflash_num_requests_waiting",
-            "Number of requests accepted by the driver and queued, not yet executing (vLLM vllm:num_requests_waiting semantics)",
+            "Number of requests accepted by the driver and queued, not yet executing (vLLM vllm:num_requests_waiting semantics). A device sequence with no lane is waiting, including one that was preempted",
+        )
+        .expect("static metric descriptor");
+        let lane_evictions_total = IntCounter::new(
+            "sparkflash_lane_evictions_total",
+            "Idle lanes freed so a growing lane could stay inside the lane-memory budget",
+        )
+        .expect("static metric descriptor");
+        let preemptions_total = IntCounter::new(
+            "sparkflash_preemptions_total",
+            "Running sequences preempted so a growing lane could stay inside the lane-memory budget",
         )
         .expect("static metric descriptor");
         let generation_tokens_total = IntCounter::new(
@@ -257,6 +273,8 @@ impl Metrics {
             Box::new(uma_free_gib.clone()),
             Box::new(num_requests_running.clone()),
             Box::new(num_requests_waiting.clone()),
+            Box::new(lane_evictions_total.clone()),
+            Box::new(preemptions_total.clone()),
             Box::new(generation_tokens_total.clone()),
             Box::new(serving.clone()),
             Box::new(requests_rejected_total.clone()),
@@ -290,6 +308,8 @@ impl Metrics {
             uma_free_gib,
             num_requests_running,
             num_requests_waiting,
+            lane_evictions_total,
+            preemptions_total,
             generation_tokens_total,
             time_to_first_token_seconds,
             serving,
@@ -372,18 +392,43 @@ impl Metrics {
     /// Records admission of one queued request: it stops waiting and starts executing.
     ///
     /// One call per admitted request, from the engine thread, immediately before the request's
-    /// first engine work.
+    /// first engine work. On the device path that is the tick that gives the sequence a lane;
+    /// a sequence accepted into the scheduler with no lane is still waiting.
     pub fn request_admitted(&self) {
         self.decrement_gauge(&self.num_requests_waiting);
         self.num_requests_running.inc();
     }
 
-    /// Records that one admitted request stopped executing, for any terminal outcome.
+    /// Records that one running request stopped executing, for any terminal outcome.
     ///
-    /// One call per admitted request after the terminal reply (or the failed/panicked path); the
-    /// driver calls it from the same thread that admitted the request.
+    /// One call per request that was running. A request that leaves while it is still waiting
+    /// is [`Self::request_left_waiting`] instead, so the waiting gauge is the one that moves.
     pub fn request_finished(&self) {
         self.decrement_gauge(&self.num_requests_running);
+    }
+
+    /// An idle lane was freed so a growing lane could stay inside the lane-memory budget.
+    pub fn record_lane_eviction(&self) {
+        self.lane_evictions_total.inc();
+    }
+
+    /// A running sequence was preempted so a growing lane could stay inside the budget.
+    pub fn record_preemption(&self) {
+        self.preemptions_total.inc();
+    }
+
+    /// A running sequence gave its lane back and is waiting for one again.
+    ///
+    /// The request has not left, so the two gauges trade one count and their sum stays put.
+    pub fn request_preempted(&self) {
+        self.decrement_gauge(&self.num_requests_running);
+        self.num_requests_waiting.inc();
+    }
+
+    /// A request left while it was still waiting: it never held a lane, or it was preempted
+    /// and did not get one back.
+    pub fn request_left_waiting(&self) {
+        self.decrement_gauge(&self.num_requests_waiting);
     }
 
     /// Counts generated token ids.

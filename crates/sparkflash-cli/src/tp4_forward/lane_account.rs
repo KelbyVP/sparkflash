@@ -24,6 +24,20 @@ use sparkflash_api::Metrics;
 #[cfg(test)]
 use std::sync::Arc;
 
+/// What one scheduler tick did to lanes, in the order it happened.
+///
+/// Rank 0 turns these into metrics. The choice of who lost a lane is already made;
+/// dropping a note does not put that lane back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaneNote {
+    /// An idle lane was freed so another lane could grow.
+    Evicted,
+    /// Sequence `id` was given a lane.
+    Granted { id: u64 },
+    /// Sequence `id` was preempted off its lane.
+    Preempted { id: u64 },
+}
+
 /// One log line for a preemption: the sequence, where it had got to, and the lane
 /// pool's held and budget memory in MiB.
 #[must_use]
@@ -47,22 +61,20 @@ pub(crate) fn pick_lru(lanes: impl Iterator<Item = (usize, u64)>) -> Option<usiz
         .map(|(index, _)| index)
 }
 
-/// The free lane `Batch::place` takes when every candidate shares the same prefix:
-/// least recently used, then the higher index.
-pub(crate) fn pick_free_lane(free: &[(usize, u64)]) -> Option<usize> {
+/// Least recently used free lane, then the higher index. That is the order `Batch::place`
+/// uses once the shared prefix does not decide. The test pool has no prefix cache, so this
+/// is the whole choice; `place` itself stays on the device.
+#[cfg(test)]
+fn pick_free_lane(free: &[(usize, u64)]) -> Option<usize> {
     free.iter()
         .max_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)))
         .map(|(lane, _)| *lane)
 }
 
-/// A sequence joined the scheduler. It has no lane yet, so it is not running.
-pub(crate) fn count_join(metrics: &Metrics, on_lane: &mut bool) {
-    // Joining the scheduler is not a lane. Counted as running, the lane-less queue
-    // (the sequences past the lanes) inflates `sparkflash_num_requests_running`.
-    if !*on_lane {
-        *on_lane = true;
-        metrics.request_admitted();
-    }
+/// A sequence joined the scheduler. It has no lane yet, so it stays on the waiting gauge.
+pub(crate) fn count_join(_metrics: &Metrics, _on_lane: &mut bool) {
+    // Admission is not a lane. The waiting gauge already counted the request when it was
+    // enqueued; moving it to running here is what made lane-less sequences look busy.
 }
 
 /// A sequence was given a lane: it stops waiting and starts running.
@@ -74,15 +86,27 @@ pub(crate) fn count_grant(metrics: &Metrics, on_lane: &mut bool) {
 }
 
 /// An idle lane was freed so another lane could grow.
-pub(crate) fn count_eviction(_metrics: &Metrics) {}
+pub(crate) fn count_eviction(metrics: &Metrics) {
+    metrics.record_lane_eviction();
+}
 
 /// A running sequence was preempted and is waiting for a lane again.
-pub(crate) fn count_preemption(_metrics: &Metrics, _on_lane: &mut bool) {}
+pub(crate) fn count_preemption(metrics: &Metrics, on_lane: &mut bool) {
+    metrics.record_preemption();
+    if *on_lane {
+        *on_lane = false;
+        metrics.request_preempted();
+    }
+}
 
 /// A sequence left. `on_lane` is whether it was running.
 pub(crate) fn count_finish(metrics: &Metrics, on_lane: bool) {
     if on_lane {
         metrics.request_finished();
+    } else {
+        // It was waiting (never granted a lane, or preempted). The running gauge does not
+        // know about it.
+        metrics.request_left_waiting();
     }
 }
 

@@ -480,6 +480,8 @@ pub(super) struct Batch<'b, 'a, 'r> {
     /// The ms the running tick's prefill waited for Engram reads, for the trace.
     read_wait_ms: f64,
     preemptions: usize,
+    /// What this tick did to lanes, for the metrics. The scheduler does not read it.
+    notes: Vec<lane_account::LaneNote>,
 }
 
 impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
@@ -544,6 +546,7 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
                 && std::env::var("SPARKFLASH_BATCH_TRACE").as_deref() == Ok("1"),
             read_wait_ms: 0.0,
             preemptions: 0,
+            notes: Vec::new(),
         })
     }
 
@@ -567,6 +570,11 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
     /// The sequences on the scheduler.
     pub(super) fn ids(&self) -> Vec<u64> {
         self.seqs.iter().map(|seq| seq.id).collect()
+    }
+
+    /// Lane events since the last call, in the order they happened.
+    pub(super) fn take_notes(&mut self) -> Vec<lane_account::LaneNote> {
+        std::mem::take(&mut self.notes)
     }
 
     /// The lanes, the longest prompt and the lane memory, for the boot log.
@@ -1229,15 +1237,18 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
             lane_state.seq = Some(id);
             lane_state.resident.truncate(start);
             lane_state.spans.retain(|span| span.start < start);
-            let seq = &mut self.seqs[index];
-            seq.lane = Some(lane);
-            seq.pos = start;
-            seq.reused.get_or_insert(start);
-            seq.phase = if start == target {
-                Phase::Decode
-            } else {
-                Phase::Prefill { target, bulk }
-            };
+            {
+                let seq = &mut self.seqs[index];
+                seq.lane = Some(lane);
+                seq.pos = start;
+                seq.reused.get_or_insert(start);
+                seq.phase = if start == target {
+                    Phase::Decode
+                } else {
+                    Phase::Prefill { target, bulk }
+                };
+            }
+            self.notes.push(lane_account::LaneNote::Granted { id });
         }
     }
 
@@ -1366,46 +1377,16 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         if !self.attached {
             return Ok(true);
         }
-        loop {
-            if self.device.ensure_lane(lane, rows)? {
-                return Ok(true);
-            }
-            let idle = (0..self.lanes.len())
-                .filter(|&other| {
-                    other != lane
-                        && self.lanes[other].seq.is_none()
-                        && self.device.lane_backed(other) > 0
-                })
-                .min_by_key(|&other| (self.lanes[other].used, other));
-            let Some(idle) = idle else {
-                return Ok(false);
-            };
-            self.forget(idle)?;
-        }
+        lane_account::grow_for_budget(self, lane, rows)
     }
 
     /// Backs sequence `index`'s lane for its next step, preempting the newest running sequences
     /// while the memory is short. False when sequence `index` itself was preempted.
     fn make_room(&mut self, index: usize, rows: usize) -> Result<bool, String> {
-        let Some(lane) = self.seqs[index].lane else {
+        if self.seqs[index].lane.is_none() {
             return Ok(false);
-        };
-        loop {
-            if self.grow(lane, rows)? {
-                return Ok(true);
-            }
-            let Some(victim) = self
-                .seqs
-                .iter()
-                .rposition(|seq| !seq.done && seq.lane.is_some())
-            else {
-                return Ok(false);
-            };
-            self.preempt(victim)?;
-            if victim == index {
-                return Ok(false);
-            }
         }
+        lane_account::make_room_for(self, index, rows)
     }
 
     /// Sends sequence `index` back to wait: its lane and the lane's memory go, and its tokens are
@@ -1418,22 +1399,78 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         let Some(lane) = seq.lane.take() else {
             return Ok(());
         };
+        // `pos` is cleared below, and the token vec is the whole prompt, not where it had got to.
+        let position = seq.pos;
         seq.phase = Phase::Waiting;
         seq.pos = 0;
         self.lanes[lane].seq = None;
         self.lanes[lane].used = self.ticks;
+        // `forget` gives this lane's chunks back, so the held figure has to be read first.
+        let (held, budget) = self.device.lane_memory();
         self.forget(lane)?;
         self.preemptions += 1;
         if self.inputs.rank == 0 {
             eprintln!(
-                "batch: preempted sequence {id} at {} tokens to free lane memory ({} preemptions)",
-                self.seqs[index].tokens.len(),
-                self.preemptions
+                "{}",
+                lane_account::preemption_line(id, position, held, budget)
             );
         }
         Ok(())
     }
+}
 
+impl<'b, 'a, 'r> lane_account::GrowOps for Batch<'b, 'a, 'r> {
+    fn try_back(&mut self, lane: usize, rows: usize) -> Result<bool, String> {
+        self.device.ensure_lane(lane, rows)
+    }
+
+    fn lru_idle(&self, except: usize) -> Option<usize> {
+        lane_account::pick_lru((0..self.lanes.len()).filter_map(|other| {
+            if other == except
+                || self.lanes[other].seq.is_some()
+                || self.device.lane_backed(other) == 0
+            {
+                None
+            } else {
+                Some((other, self.lanes[other].used))
+            }
+        }))
+    }
+
+    fn release_idle(&mut self, lane: usize) -> Result<(), String> {
+        self.forget(lane)
+    }
+
+    fn note_eviction(&mut self) {
+        self.notes.push(lane_account::LaneNote::Evicted);
+    }
+}
+
+impl<'b, 'a, 'r> lane_account::RoomOps for Batch<'b, 'a, 'r> {
+    fn grow_for(&mut self, index: usize, rows: usize) -> Result<bool, String> {
+        let Some(lane) = self.seqs[index].lane else {
+            return Ok(false);
+        };
+        self.grow(lane, rows)
+    }
+
+    fn newest_running(&self) -> Option<usize> {
+        self.seqs
+            .iter()
+            .rposition(|seq| !seq.done && seq.lane.is_some())
+    }
+
+    fn preempt_at(&mut self, index: usize) -> Result<(), String> {
+        self.preempt(index)
+    }
+
+    fn note_preemption(&mut self, index: usize) {
+        let id = self.seqs[index].id;
+        self.notes.push(lane_account::LaneNote::Preempted { id });
+    }
+}
+
+impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
     /// One prefill chunk (or up to the tick's exact steps) of sequence `index`.
     fn prefill(
         &mut self,
