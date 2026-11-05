@@ -27,7 +27,7 @@
 //!
 //! The numeric table is the 1017 checkpoint encoder (blob `3c7c357d`, DECISIONS.md D66):
 //! low/minimal 50, high/medium/xhigh 75, max 100, and an absent value is high (75).
-//! A test pins the API table, the render default and the seam parser together.
+//! A test pins the API table to the render default and the seam budget constants.
 
 use serde_json::Value;
 use thiserror::Error;
@@ -243,8 +243,7 @@ mod tests {
     use serde_json::json;
     use sparkflash_model_deepseek_v41::encoding::{
         DEFAULT_EFFORT_SCORE, TEMPLATE_EFFORT_DEFAULT, TEMPLATE_EFFORT_HIGH, TEMPLATE_EFFORT_LOW,
-        TEMPLATE_EFFORT_MAX, TEMPLATE_EFFORT_XHIGH, parse_template_reasoning_effort,
-        resolve_reasoning_effort,
+        TEMPLATE_EFFORT_MAX, TEMPLATE_EFFORT_XHIGH, resolve_reasoning_effort,
     };
 
     #[test]
@@ -311,24 +310,13 @@ mod tests {
         assert_eq!(default.score, Some(EFFORT_DEFAULT));
         assert_eq!(default.error, None);
         assert_eq!(resolve_reasoning_effort(None, false).score, None);
-        // The render default and the seam parser are the same table, not a second copy.
+        // The render default and the seam budgets are the same table, not a second copy.
         assert_eq!(DEFAULT_EFFORT_SCORE, EFFORT_DEFAULT);
         assert_eq!(TEMPLATE_EFFORT_DEFAULT, EFFORT_DEFAULT);
         assert_eq!(TEMPLATE_EFFORT_LOW, EFFORT_LOW);
         assert_eq!(TEMPLATE_EFFORT_HIGH, EFFORT_HIGH);
         assert_eq!(TEMPLATE_EFFORT_XHIGH, EFFORT_XHIGH);
         assert_eq!(TEMPLATE_EFFORT_MAX, EFFORT_MAX_SCORE);
-        for name in ["low", "minimal", "medium", "high", "xhigh", "max"] {
-            let seam = parse_template_reasoning_effort(Some(&json!(name)))
-                .unwrap_or_else(|error| panic!("seam parser {name}: {error}"));
-            assert_eq!(Some(seam), effort_for_name(name), "seam parser {name}");
-        }
-        assert_eq!(
-            parse_template_reasoning_effort(None).expect("missing effort"),
-            parse_effort(None)
-                .expect("missing effort")
-                .expect("a score")
-        );
     }
 
     #[test]

@@ -21,7 +21,7 @@
  "vllm_tokenizer_wrapper_sha256": "d6e9cbce7c5f127819452fa5d03dd4f22ad9f136dd202a54b5b31fe42402cae2",
  "vllm_encoding_copy_sha256": "fa501415211cd0e0c9f06ee6033c5466046e293b6153bca6200b70695b88fc73",
  "repo_reference_encoding_sha256": "13231c592e958fb39e2af6001dae69d90e7a36b265702b9b390236fb387599e2",
- "fixture_parity_check": "The image's vllm/tokenizers/deepseek_v41_encoding.py reproduces reference/encoding/tests/test_output_1..5.txt byte-for-byte when fed the reference fixtures with the wrapper's message normalisation (checked offline on 2026-10-19); the Rust port is golden-tested against the same files.",
+ "fixture_parity_check": "The image's vllm/tokenizers/deepseek_v41_encoding.py matched reference/encoding/tests/test_output_1..5.txt byte-for-byte when fed the reference fixtures with the wrapper's message normalisation (checked offline on 2026-10-19, before D66). test_output_1.txt now follows the checkpoint effort table. The Rust port is golden-tested against the same files.",
  "tokenizer_class_reported_by_transformers": "TokenizersBackend",
  "vocab_size": 128000,
  "bos_token_id": 0,

@@ -268,9 +268,40 @@ fn chat_template_refuses_unknown_roles_loudly() {
 }
 
 #[test]
+fn chat_template_effort_aliases_match_the_1017_table() {
+    // encode_chat is the seam parser the other tests call. minimal is 50 and medium is 75.
+    let seam = seam();
+    let cases = [
+        (None, 75u8),
+        (Some("low"), 50),
+        (Some("minimal"), 50),
+        (Some("medium"), 75),
+        (Some("high"), 75),
+        (Some("xhigh"), 75),
+        (Some("max"), 100),
+    ];
+    for (name, score) in cases {
+        let request = match name {
+            None => json!({"messages": [{"role": "user", "content": "hi"}]}),
+            Some(alias) => json!({
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"reasoning_effort": alias}
+            }),
+        };
+        let ids = seam
+            .encode_chat(&request)
+            .unwrap_or_else(|error| panic!("{name:?}: {error}"));
+        let text = seam.decode(&ids).expect("the prompt decodes");
+        assert!(
+            text.contains(&format!("Reasoning Effort: {score} ")),
+            "{name:?} must render {score}: {text}"
+        );
+    }
+}
+
+#[test]
 fn chat_template_refuses_unsupported_effort_loudly() {
-    // Unknown spellings are still refused with the released server's text. `medium` and
-    // `minimal` are accepted (D66) and are pinned with the seam parser, not here.
+    // Unknown spellings are still refused with the released server's text.
     let error = seam()
         .encode_chat(&json!({
             "messages": [{"role": "user", "content": "hi"}],
