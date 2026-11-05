@@ -66,6 +66,9 @@ use super::{
     finished_event_with_fabric, load_tokenizer, refused, tp4_cluster_snapshot,
 };
 use crate::device_link::{DeviceFinish, DeviceJob, DeviceLink, DeviceOutcome, DeviceTick};
+use crate::tp4_forward::lane_account::{
+    count_eviction, count_finish, count_grant, count_preemption,
+};
 use sparkflash_api::VisionImage;
 use sparkflash_model::vision::{ImageGrid as Grid, ImageSpan};
 use sparkflash_vision::{Geometry, IMAGE_TOKEN_ID};
@@ -560,6 +563,9 @@ struct Live {
     closed: bool,
     /// A failure on rank 0 alone (the detokeniser): the request ends with it, the group carries on.
     failed: Option<String>,
+    /// The gauges count this request as running. False until it holds a lane, and false again
+    /// after a preemption: either way it is waiting.
+    on_lane: bool,
 }
 
 impl Live {
@@ -578,6 +584,7 @@ impl Live {
             stop,
             closed: false,
             failed: None,
+            on_lane: false,
         }
     }
 
@@ -761,7 +768,7 @@ impl Live {
                 });
             }
         }
-        metrics.request_finished();
+        count_finish(metrics, self.on_lane);
     }
 }
 
@@ -969,15 +976,15 @@ struct HubLink {
 impl HubLink {
     /// Takes `pending` onto the device as the next sequence, unless its client already left.
     fn admit(&mut self, pending: Pending, admit: &mut Vec<(u64, DeviceJob)>) {
-        self.metrics.request_admitted();
         if pending.events.is_closed() {
-            // The client left while the request was queued.
-            self.metrics.request_finished();
+            // Queued, and it never got a lane, so it leaves the waiting gauge.
+            count_finish(&self.metrics, false);
             return;
         }
         let seq = self.next_seq;
         self.next_seq += 1;
         admit.push((seq, pending.job.clone()));
+        // No lane yet. `place` grants one on a later tick; until then the request stays waiting.
         self.live.insert(seq, Live::new(pending));
     }
 
@@ -1097,6 +1104,29 @@ impl DeviceLink for HubLink {
         Ok(())
     }
 
+    fn lane_evicted(&mut self) {
+        count_eviction(&self.metrics);
+    }
+
+    fn lane_granted(&mut self, seq: u64) {
+        let metrics = Arc::clone(&self.metrics);
+        let Some(live) = self.live.get_mut(&seq) else {
+            return;
+        };
+        count_grant(&metrics, &mut live.on_lane);
+    }
+
+    fn lane_preempted(&mut self, seq: u64) {
+        let metrics = Arc::clone(&self.metrics);
+        // Warm-up sequences are not in `live`. The counter still moves; they have no gauge.
+        if let Some(live) = self.live.get_mut(&seq) {
+            count_preemption(&metrics, &mut live.on_lane);
+        } else {
+            let mut on_lane = false;
+            count_preemption(&metrics, &mut on_lane);
+        }
+    }
+
     /// `/health` turns 503 and new requests are refused; the requests still on the device and the
     /// ones queued for it get the error; then the process exits (the workers follow when the
     /// control channel closes).
@@ -1110,12 +1140,12 @@ impl DeviceLink for HubLink {
             live.finish(Err(error), &self.metrics);
         }
         while let Ok(pending) = self.jobs.try_recv() {
-            self.metrics.request_admitted();
+            // Still in the driver queue: waiting, never given a lane.
+            count_finish(&self.metrics, false);
             let _ = pending.events.send(EngineEvent::Error {
                 message: format!("the device loop failed: {error}"),
                 code: ENGINE_GONE_CODE.to_owned(),
             });
-            self.metrics.request_finished();
         }
         std::thread::sleep(FAIL_GRACE);
         exit_now(1);

@@ -218,6 +218,17 @@ pub trait DeviceLink: Send {
     /// The control channel failed.
     fn finish(&mut self, seq: u64, outcome: Result<&DeviceOutcome, &str>) -> Result<(), String>;
 
+    /// An idle lane was freed to stay inside the lane-memory budget.
+    ///
+    /// The default is empty: every rank runs the same eviction, and only rank 0's link counts it.
+    fn lane_evicted(&mut self) {}
+
+    /// Sequence `seq` was given a lane and counts as running. Workers ignore it.
+    fn lane_granted(&mut self, _seq: u64) {}
+
+    /// Sequence `seq` was preempted off its lane and counts as waiting again. Workers ignore it.
+    fn lane_preempted(&mut self, _seq: u64) {}
+
     /// The loop failed with `error` and stops; the scheduler is still up. Tearing the epoch down
     /// after a failed step may never return (a faulted context, a collective whose peers have
     /// gone), so a serving link ends the process from here rather than after it.

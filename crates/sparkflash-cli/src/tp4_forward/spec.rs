@@ -1810,6 +1810,8 @@ fn serve_ticks(
             );
         }
     }
+    // Warm-up frees lanes too. Apply that before the first client, and before any finish.
+    report_lane_notes(batch, link);
     if inputs.rank == 0 {
         println!("sparkflash serve: {}", batch.describe());
     }
@@ -1839,12 +1841,16 @@ fn serve_ticks(
             Ok(emissions) => emissions,
             Err(error) => {
                 // A failure inside a step may have left the ranks at different collectives.
+                // Notes first: a sequence granted on this tick is running, so its finish
+                // leaves the running gauge rather than the waiting one.
+                report_lane_notes(batch, link);
                 for id in batch.ids() {
                     let _ = link.finish(id, Err(&error));
                 }
                 return Err(error);
             }
         };
+        report_lane_notes(batch, link);
         for Emission { seq, tokens, done } in emissions {
             if !tokens.is_empty() {
                 link.emit(seq, &tokens, done.is_some());
@@ -1857,6 +1863,18 @@ fn serve_ticks(
         }
     }
     Ok(())
+}
+
+/// Rank 0's gauges follow these notes. A worker's link ignores them, so a lane freed on
+/// every rank is counted once.
+fn report_lane_notes(batch: &mut Batch<'_, '_, '_>, link: &mut dyn DeviceLink) {
+    for note in batch.take_notes() {
+        match note {
+            lane_account::LaneNote::Evicted => link.lane_evicted(),
+            lane_account::LaneNote::Granted { id } => link.lane_granted(id),
+            lane_account::LaneNote::Preempted { id } => link.lane_preempted(id),
+        }
+    }
 }
 
 #[cfg(test)]
