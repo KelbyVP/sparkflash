@@ -125,12 +125,12 @@ fn effort_resolution_is_total() {
 #[test]
 fn effort_resolution_maps_documented_values() {
     let low = resolve_reasoning_effort(Some(&json!("low")), true);
-    assert_eq!(low.score, Some(25));
+    assert_eq!(low.score, Some(50));
     assert_eq!(low.effort, Some(ReasoningEffort::Low));
     assert!(low.error.is_none());
 
     let high = resolve_reasoning_effort(Some(&json!("high")), true);
-    assert_eq!(high.score, Some(50));
+    assert_eq!(high.score, Some(75));
     assert_eq!(high.effort, Some(ReasoningEffort::High));
 
     let xhigh = resolve_reasoning_effort(Some(&json!("xhigh")), true);
@@ -142,7 +142,7 @@ fn effort_resolution_maps_documented_values() {
     assert_eq!(max.effort, Some(ReasoningEffort::Max));
 
     let absent = resolve_reasoning_effort(None, true);
-    assert_eq!(absent.score, Some(50));
+    assert_eq!(absent.score, Some(75));
     assert!(absent.error.is_none());
 
     let numeric = resolve_reasoning_effort(Some(&json!(63)), true);
@@ -181,7 +181,7 @@ fn effort_resolution_maps_documented_values() {
     );
 
     let unknown = resolve_reasoning_effort(Some(&json!("bogus")), true);
-    assert_eq!(unknown.score, Some(50));
+    assert_eq!(unknown.score, Some(75));
     assert_eq!(
         unknown.error,
         Some(ReasoningEffortError::UnknownAlias("bogus".to_owned()))
@@ -256,13 +256,43 @@ fn synthetic_case_rendering_is_deterministic_and_effort_retargets() {
     let again = encoding.render_case(case, None).expect("render").prompt;
     assert_eq!(base, again);
     assert!(
-        base.contains(&format!("{BOS}{SYSTEM}Reasoning Effort: 50{EFFORT_SUFFIX}")),
-        "python default effort must be 50: {base}"
+        base.contains(&format!("{BOS}{SYSTEM}Reasoning Effort: 75{EFFORT_SUFFIX}")),
+        "python default effort must be 75: {base}"
     );
     let retargeted = encoding.render_case(case, Some(88)).expect("render").prompt;
     assert!(retargeted.contains(&format!("{BOS}{SYSTEM}Reasoning Effort: 88{EFFORT_SUFFIX}")));
     assert_eq!(
         retarget_reasoning_effort(retargeted.clone(), 88),
         retargeted
+    );
+}
+
+#[test]
+fn rendered_thinking_prompt_uses_the_1017_checkpoint_effort() {
+    let encoding = SparkV41Encoding::default();
+    let absent = parse_cases(&json!({
+        "thinking_mode": "thinking",
+        "messages": [{ "role": "user", "content": "question" }]
+    }))
+    .expect("parse");
+    let prompt = encoding
+        .render_case(&absent[0], None)
+        .expect("render")
+        .prompt;
+    assert!(
+        prompt.contains("Reasoning Effort: 75"),
+        "absent effort must render the checkpoint default: {prompt}"
+    );
+
+    let low = parse_cases(&json!({
+        "thinking_mode": "thinking",
+        "reasoning_effort": "low",
+        "messages": [{ "role": "user", "content": "question" }]
+    }))
+    .expect("parse");
+    let prompt = encoding.render_case(&low[0], None).expect("render").prompt;
+    assert!(
+        prompt.contains("Reasoning Effort: 50"),
+        "low must render the checkpoint score: {prompt}"
     );
 }

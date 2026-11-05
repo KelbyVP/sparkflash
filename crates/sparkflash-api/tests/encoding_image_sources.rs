@@ -32,8 +32,8 @@ const ASSISTANT: &str = "<｜Assistant｜>";
 const IMAGE: &str = "<｜deepseek_image｜>";
 const THINK_START: &str = "<think>";
 const THINK_END: &str = "</think>";
-const EFFORT_50: &str =
-    "Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n";
+const EFFORT_75: &str =
+    "Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n";
 
 const CONTEXT_IMAGE_URL: &str = "https://example.com/a.png";
 const CURRENT_IMAGE_URL: &str = "https://example.com/b.png";
@@ -114,10 +114,10 @@ fn thinking_b() -> String {
     format!("{USER}current text{ASSISTANT}{THINK_START}")
 }
 fn thinking_c() -> String {
-    format!("{BOS}{SYSTEM}{EFFORT_50}{USER}current text\n\n{IMAGE}{ASSISTANT}{THINK_START}")
+    format!("{BOS}{SYSTEM}{EFFORT_75}{USER}current text\n\n{IMAGE}{ASSISTANT}{THINK_START}")
 }
 fn thinking_d() -> String {
-    format!("{BOS}{SYSTEM}{EFFORT_50}{USER}current text{ASSISTANT}{THINK_START}")
+    format!("{BOS}{SYSTEM}{EFFORT_75}{USER}current text{ASSISTANT}{THINK_START}")
 }
 
 fn shapes() -> Vec<Shape> {

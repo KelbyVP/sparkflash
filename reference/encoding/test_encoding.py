@@ -118,10 +118,9 @@ def test_v41_rejects_image_placeholder_in_text() -> None:
 @pytest.mark.parametrize(
     ("effort", "budget"),
     [
-        (None, 50),
-        ("low", 25),
-        ("high", 50),
-        ("xhigh", 75),
+        (None, 75),
+        ("low", 50),
+        ("high", 75),
         ("max", 100),
         (1, 1),
         (42, 42),
@@ -171,7 +170,7 @@ def test_v41_chat_mode_has_no_reasoning_effort_or_system_token() -> None:
     assert prompt == '<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜></think>'
 
 
-@pytest.mark.parametrize("effort", [-1, 0, 101, "medium"])
+@pytest.mark.parametrize("effort", [-1, 0, 101, "medium", "minimal", "xhigh"])
 def test_v41_rejects_out_of_range_or_unknown_reasoning_effort(
     effort: Any,
 ) -> None:

@@ -276,7 +276,7 @@ fn case_to_conversation(case: &EncodingCase) -> Option<Conversation> {
 fn conversation_path_matches_golden_vector_1() {
     let case = load_golden_case(1);
     let conversation = case_to_conversation(&case).expect("vector 1 is representable");
-    let rendered = SparkV41Encoding::new().render_conversation(&conversation, Some(50));
+    let rendered = SparkV41Encoding::new().render_conversation(&conversation, None);
     assert_prompt_eq(1, &rendered.prompt, &golden_text(1));
 }
 

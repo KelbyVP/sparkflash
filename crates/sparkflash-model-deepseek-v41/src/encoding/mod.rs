@@ -138,10 +138,10 @@ fn default_effort_spec(error: Option<ReasoningEffortError>) -> ReasoningEffortSp
 
 /// Resolve the reasoning effort of a request.
 ///
-/// Accepts an integer in 1..=100, the aliases low=25, high/medium=50, xhigh=75,
+/// Accepts an integer in 1..=100, the aliases low/minimal=50, high/medium/xhigh=75,
 /// and max=100, or the whole request object (whose reasoning_effort field is used).
-/// Absent values default to 50 (`high`) while thinking, matching the released
-/// V4.1 encoder. With thinking disabled no effort line is rendered. Out-of-range
+/// Absent values default to 75 (`high`) while thinking, matching the 1017
+/// checkpoint encoder (blob `3c7c357d`, DECISIONS.md D66). With thinking disabled no effort line is rendered. Out-of-range
 /// integers are clamped into 1..=100 and reported through
 /// `ReasoningEffortSpec::error`.
 pub fn resolve_reasoning_effort(
@@ -286,10 +286,10 @@ fn python_effort_score(
             }
         }
         Value::String(alias) => match alias.as_str() {
-            "low" => Ok(Some(25)),
-            "high" => Ok(Some(50)),
-            "xhigh" => Ok(Some(75)),
-            "max" => Ok(Some(100)),
+            "low" | "minimal" => Ok(Some(TEMPLATE_EFFORT_LOW)),
+            "high" | "medium" => Ok(Some(TEMPLATE_EFFORT_HIGH)),
+            "xhigh" => Ok(Some(TEMPLATE_EFFORT_XHIGH)),
+            "max" => Ok(Some(TEMPLATE_EFFORT_MAX)),
             other => Err(CaseError::InvalidReasoningEffort(other.to_owned())),
         },
         other => Err(CaseError::InvalidReasoningEffort(other.to_string())),

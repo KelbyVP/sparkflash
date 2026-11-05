@@ -5,7 +5,7 @@ other** on the reasoning-effort scale:
 
 | Source | Path | Scale |
 | :--- | :--- | :--- |
-| Python (dataset/eval encoder) | <checkpoint>/encoding/encoding.py | low 25, high 50, xhigh 75, max 100; default "high" = 50 (encoding.py:398-404) |
+| Python (1017 checkpoint encoder, blob `3c7c357d`) | reference/encoding/encoding.py | low 50, high 75, max 100; default "high" = 75 (D66). SparkFlash also keeps minimal = 50, medium = 75 and xhigh = 75 |
 | Rust toolkit (deepseek-recipe) | .../deepseek-recipe-encoding-0.1.0/src/v4/dsv41.rs | Low 50, High/Xhigh/(None) 75, Max 100 (dsv41.rs:6-15) |
 | Shared template | both | "Reasoning Effort: {n} (range 1-100, the higher the value, the more thorough the reasoning)\n\n" |
 
@@ -132,7 +132,7 @@ Rendering rules for an actual call (mod.rs:36-116):
 - If the arguments string is not a JSON object, the toolkit logs a warning and wraps the raw text as
   {"arguments": <raw>} (mod.rs:48-57).
 
-The tokenizer-level mirror of all of this exists in the Python encoder (encoding.py:380-460), which
+The tokenizer-level mirror of all of this exists in the Python encoder (encoding.py:428-474), which
 implements the same templates; only the effort table differs.
 
 ---
@@ -152,14 +152,14 @@ implements the same templates; only the effort table differs.
 
 Note the two-step default: `thinking.then_some(effort.unwrap_or(ReasoningEffort::High))`
 (convert.rs:96). With thinking enabled and no effort given, the rendered line is
-"Reasoning Effort: 75" in the Rust pipeline (High → 75, dsv41.rs:9) but "Reasoning Effort: 50" in the
-Python pipeline (high → 50, encoding.py:400).
+"Reasoning Effort: 75" in both pipelines after D66 (checkpoint `high` is 75, blob `3c7c357d`).
+The older vendored table rendered Python `high` as 50.
 
 ---
 
 ## 5. Reasoning-effort line placement
 
-Rendered **only** when index == 0 **and** thinking mode is on (dsv41.rs:74-77; encoding.py:423-424).
+Rendered **only** when index == 0 **and** thinking mode is on (dsv41.rs:74-77; encoding.py:472).
 It is inserted after the `<｜System｜>` marker when that marker was emitted and before the system
 content (mod.rs:129-136). Consequences:
 
@@ -179,17 +179,15 @@ InferenceOptions).
 
 **D1 — The spec's effort mapping contradicts encoding.py, which the same spec names as the reference
 for unit tests.** The spec says `1..100, default 75, low=50, high=75, max=100` (spec line 1332) and
-proposes to test against encoding.py test vectors; encoding.py maps low=25, high=50, xhigh=75,
-max=100 with default high (encoding.py:398-404). The spec's numbers match the *Rust* toolkit, so the
-two "references" cannot both be the oracle. SparkFlash-RS picks `encoding.py`'s table on every
-API surface (D44/D46): low=25, high=50, xhigh=75, max=100, default 50; the Rust toolkit's
-50/75/75/100 renderer table is not used for prompt rendering.
+proposes to test against encoding.py test vectors. The 1017 checkpoint encoder (blob `3c7c357d`)
+maps low=50, high=75, max=100, and an absent value is high (75). SparkFlash-RS uses that table on
+every API surface (D66, which amends D46): low/minimal=50, high/medium/xhigh=75, max=100, default 75.
 
 **D2 — The spec advertises `reasoning_effort: 1..100` on the REST surface, but the Rust pipeline
 cannot carry an arbitrary integer.** `ReasoningEffort` has exactly four variants
 (conversation.rs:47-55) and the OpenAI adapter maps the seven string values onto them
 (convert.rs:217-224). An integer 37 has no representation; only the Python encoder accepts it
-(encoding.py:415-422). Supporting 1..100 requires extending the Rust enum (e.g. a
+(encoding.py:464-468). Supporting 1..100 requires extending the Rust enum (e.g. a
 `Numeric(u8)` variant) or bypassing the toolkit's renderer.
 
 **D3 — The spec's tag list omits the leading spaces that distinguish V4.1 from V4.** The block name

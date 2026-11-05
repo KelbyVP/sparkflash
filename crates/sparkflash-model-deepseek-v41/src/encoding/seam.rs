@@ -119,14 +119,13 @@ use super::{
     OpenAiToolCall, ThinkingMode, load_hf_tokenizer,
 };
 
-/// Alias budgets of the official V4.1 encoder (encoding.py): low 25, high 50,
-/// xhigh 75, max 100. This is NOT the recipe-scale surface table in
-/// crate::reasoning; the chat template renders this scale because that is what
-/// the released server renders.
-pub const TEMPLATE_EFFORT_LOW: u8 = 25;
-/// Numeric budget for "high", the encoder's default.
-pub const TEMPLATE_EFFORT_HIGH: u8 = 50;
-/// Numeric budget for "xhigh".
+/// Alias budgets of the 1017 checkpoint encoder (blob `3c7c357d`): low 50,
+/// high 75, max 100. `minimal` uses the low score, and `medium` and `xhigh`
+/// use the high score. See DECISIONS.md D66.
+pub const TEMPLATE_EFFORT_LOW: u8 = 50;
+/// Numeric budget for "high" and "medium", and the encoder's default.
+pub const TEMPLATE_EFFORT_HIGH: u8 = 75;
+/// Numeric budget for "xhigh". The checkpoint names no `xhigh` alias; the score stays 75.
 pub const TEMPLATE_EFFORT_XHIGH: u8 = 75;
 /// Numeric budget for "max".
 pub const TEMPLATE_EFFORT_MAX: u8 = 100;
@@ -619,8 +618,8 @@ fn resolve_effort(
     let score = match &effective {
         Value::Null => TEMPLATE_EFFORT_DEFAULT,
         Value::String(name) => match name.as_str() {
-            "low" => TEMPLATE_EFFORT_LOW,
-            "high" => TEMPLATE_EFFORT_HIGH,
+            "low" | "minimal" => TEMPLATE_EFFORT_LOW,
+            "high" | "medium" => TEMPLATE_EFFORT_HIGH,
             "xhigh" => TEMPLATE_EFFORT_XHIGH,
             "max" => TEMPLATE_EFFORT_MAX,
             _ => return Err(TokenizerSeamError::InvalidReasoningEffort),
