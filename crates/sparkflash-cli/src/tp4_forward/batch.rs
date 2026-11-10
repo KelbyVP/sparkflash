@@ -33,7 +33,10 @@
 //!    their own but a window, which rebuilds over those last rows, so the logits, the drafter's
 //!    seeds and the windows decode reads are the full run's. A lane holding such skipped rows
 //!    resumes past them only where its windows are whole, else backs up into the new prompt's
-//!    last [`DECODER_WARM`] rows (SPARKFLASH_PREFILL_DECODER_SKIP=0 runs every layer);
+//!    last [`DECODER_WARM`] rows (SPARKFLASH_PREFILL_DECODER_SKIP=0 runs every layer). Short
+//!    rests that are one chunk each run together on the bulk rows states ([`Batch::together`]);
+//!    with SPARKFLASH_PREFILL_GATHER_TICKS=N a short rest may wait up to N ticks beside the
+//!    decoders for more to join it, never while a long prompt waits ([`super::gather`]);
 //! 3. runs one decode step over every decoding sequence. A lone sequence takes the speculative
 //!    step (draft, verify, accept); up to thirty-two (R_MAX / 2) take one speculative step together
 //!    (each drafts, in passes of up to sixteen, and the step's R_MAX rows go to the anchors and then
@@ -54,6 +57,7 @@
 //! (the same place, grid and canvas key).
 
 use super::draft::{AnchorRow, BLOCK, DraftBlock, DraftState};
+use super::gather::{self, PrefillOps, Together, Turn};
 use super::lanes::{NO_LANE, SLIDE_STEP, Seg, slide_floor};
 use super::rows::{R_MAX, RowsState};
 use super::sample::Sampler;
@@ -315,6 +319,8 @@ struct Seq {
     verify_ms: f64,
     phase_ms: [f64; 4],
     reused: Option<usize>,
+    /// Its ticks in prefill, for the gather rule ([`gather::Wait`]).
+    gather: gather::Wait,
 }
 
 impl Seq {
@@ -464,6 +470,8 @@ pub(super) struct Batch<'b, 'a, 'r> {
     decoder_skip: bool,
     busy_chunk: usize,
     busy_exact_steps: usize,
+    /// The most ticks a short prefill waits for others to join it ([`gather::ticks`]).
+    gather_ticks: u64,
     /// The shared speculative step's draft floor ([`batch_spec_floor`]); None: the plain step.
     spec_floor: Option<f64>,
     share: DecodeShare,
@@ -533,6 +541,7 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
             decoder_skip: std::env::var("SPARKFLASH_PREFILL_DECODER_SKIP").as_deref() != Ok("0"),
             busy_chunk: busy_chunk(),
             busy_exact_steps: busy_exact_steps(),
+            gather_ticks: gather::ticks(),
             spec_floor: batch_spec_floor(),
             share: DecodeShare::from_env(),
             chunk_ms: 0.0,
@@ -708,6 +717,7 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
             verify_ms: 0.0,
             phase_ms: [0.0; 4],
             reused: None,
+            gather: gather::Wait::default(),
         });
         self.keep_awake();
         Ok(())
@@ -823,38 +833,20 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         let mut out = Vec::new();
         self.place(&mut out)?;
         let decoding = self.decoding();
-        let mut prefilled = None;
-        let mut long_chunk = None;
-        if let Some(&(_, index)) = self.prefill_order().first() {
-            // The rows another lane holds are copied, not run (prefill's own adopt then finds
-            // nothing more): the clock below counts only the rows the chunk computes.
-            self.adopt(index)?;
-            let seq = &self.seqs[index];
-            let left = match seq.phase {
-                Phase::Prefill { target, .. } => target.saturating_sub(seq.pos),
-                Phase::Waiting | Phase::Decode => 0,
-            };
-            // Every rank takes the same branch: the rows left and `decoding` are the scheduler's
-            // state, and `hold` is rank 0's.
-            if !(hold && decoding && left > SHARE_MIN_ROWS) {
-                let from = self.seqs[index].pos;
-                let together = self.together(index, decoding)?;
-                if together.len() > 1 {
-                    // Short rests only: no long chunk for the decoders' share.
-                    let ran = self.prefill_together(&together, &mut out)?;
-                    prefilled = Some((self.seqs[index].id, from, ran));
-                } else {
-                    self.prefill(index, decoding, &mut out)?;
-                    // A preempted sequence went back to position 0.
-                    let ran = self.seqs[index].pos.saturating_sub(from);
-                    prefilled = Some((self.seqs[index].id, from, ran));
-                    if left > SHARE_MIN_ROWS && ran > 0 {
-                        long_chunk = Some(ran);
-                        self.tick_chunk = true;
-                    }
-                }
-            }
-        }
+        // Every rank takes the same turn: it reads the scheduler's state, and `hold` is rank 0's.
+        let gather_ticks = self.gather_ticks;
+        let turn =
+            gather::prefill_turn(self, gather_ticks, hold, decoding, SHARE_MIN_ROWS, &mut out)?;
+        let (prefilled, long_chunk) = match turn {
+            Turn::Idle | Turn::Share | Turn::Held => (None, None),
+            Turn::Ran {
+                id,
+                from,
+                ran,
+                long,
+            } => (Some((id, from, ran)), long.then_some(ran)),
+        };
+        self.tick_chunk = long_chunk.is_some();
         let prefill_ms = started.elapsed().as_secs_f64() * 1e3;
         let batch = self.decode(&mut out, ahead)?;
         // The decode step reads its tokens back, so the tick's wall time covers its device work.
@@ -870,10 +862,11 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         if self.trace {
             let (held, budget) = self.device.lane_memory();
             println!(
-                "batch: tick {} seqs {} prefill {prefilled:?} {prefill_ms:.1} ms (reads {:.1} ms) decode {batch} rows {:.1} ms lanes {} of {} MiB",
+                "batch: tick {} seqs {} prefill {prefilled:?} {prefill_ms:.1} ms (reads {:.1} ms){} decode {batch} rows {:.1} ms lanes {} of {} MiB",
                 self.ticks,
                 self.seqs.len(),
                 self.read_wait_ms,
+                gather::trace_field(self.gather_ticks, self.longest_wait()),
                 started.elapsed().as_secs_f64() * 1e3 - prefill_ms,
                 held >> 20,
                 budget >> 20,
@@ -1401,6 +1394,8 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         let position = seq.pos;
         seq.phase = Phase::Waiting;
         seq.pos = 0;
+        // Placed again, it waits its gather ticks afresh.
+        seq.gather = gather::Wait::default();
         self.lanes[lane].seq = None;
         self.lanes[lane].used = self.ticks;
         // `forget` gives this lane's chunks back, so the held figure has to be read first.
@@ -1440,6 +1435,71 @@ impl<'b, 'a, 'r> lane_account::GrowOps for Batch<'b, 'a, 'r> {
 
     fn note_eviction(&mut self) {
         self.notes.push(lane_account::LaneNote::Evicted);
+    }
+}
+
+/// The tick's prefill turn ([`gather::prefill_turn`]) over the scheduler's own steps.
+impl<'b, 'a, 'r> PrefillOps for Batch<'b, 'a, 'r> {
+    type Out = Vec<Emission>;
+
+    fn order(&self) -> Vec<(usize, usize)> {
+        self.prefill_order()
+    }
+
+    fn id(&self, index: usize) -> u64 {
+        self.seqs[index].id
+    }
+
+    fn pos(&self, index: usize) -> usize {
+        self.seqs[index].pos
+    }
+
+    fn left(&self, index: usize) -> usize {
+        let seq = &self.seqs[index];
+        match seq.phase {
+            Phase::Prefill { target, .. } => target.saturating_sub(seq.pos),
+            Phase::Waiting | Phase::Decode => 0,
+        }
+    }
+
+    fn prefilling(&self, index: usize) -> bool {
+        let seq = &self.seqs[index];
+        !seq.done && matches!(seq.phase, Phase::Prefill { .. })
+    }
+
+    fn whole(&self, index: usize, decoding: bool) -> bool {
+        let (budget, _) = self.bulk_budget(decoding);
+        self.whole_chunk(index, budget).is_some()
+    }
+
+    fn wait(&mut self, index: usize) -> &mut gather::Wait {
+        &mut self.seqs[index].gather
+    }
+
+    fn adopt(&mut self, index: usize) -> Result<(), String> {
+        Batch::adopt(self, index)
+    }
+
+    fn together(
+        &mut self,
+        index: usize,
+        decoding: bool,
+        order: &[(usize, usize)],
+    ) -> Result<Together, String> {
+        Batch::together(self, index, decoding, order)
+    }
+
+    fn run_together(&mut self, picked: &[usize], out: &mut Vec<Emission>) -> Result<usize, String> {
+        self.prefill_together(picked, out)
+    }
+
+    fn run_one(
+        &mut self,
+        index: usize,
+        decoding: bool,
+        out: &mut Vec<Emission>,
+    ) -> Result<(), String> {
+        self.prefill(index, decoding, out)
     }
 }
 
@@ -1902,8 +1962,15 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
     /// for it and the decode after without preempting anything. One that would copy half its rest
     /// or more from a picked one once that has run ([`Self::adopt`]) waits for it instead. Just
     /// `index` when nothing joins it, or while reads for a bulk tick are staged. Every rank answers
-    /// alike.
-    fn together(&mut self, index: usize, decoding: bool) -> Result<Vec<usize>, String> {
+    /// alike. The others are taken in `order` (the tick's [`Self::prefill_order`], or the
+    /// gather rule's [`gather::lead_order`]); the answer says whether the tick has room for more
+    /// ([`Together`]), from the rests it took alone.
+    fn together(
+        &mut self,
+        index: usize,
+        decoding: bool,
+        order: &[(usize, usize)],
+    ) -> Result<Together, String> {
         let mut picked = vec![index];
         let ways = 1 + self.inputs.bulk_more.len();
         if ways == 1
@@ -1912,15 +1979,16 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
             || self.prefill_next.is_some()
             || self.prefill_more.iter().any(Option::is_some)
         {
-            return Ok(picked);
+            return Ok(Together::alone(index));
         }
         let (budget, _) = self.bulk_budget(decoding);
         let most = if decoding { budget } else { budget * ways };
         let mut rows = match self.whole_chunk(index, budget) {
             Some((left, lane, target)) if self.grow(lane, target + BLOCK + self.k + 2)? => left,
-            _ => return Ok(picked),
+            _ => return Ok(Together::alone(index)),
         };
-        for (_, other) in self.prefill_order() {
+        let mut full = false;
+        for &(_, other) in order {
             if picked.len() == ways {
                 break;
             }
@@ -1932,6 +2000,7 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
                 continue;
             };
             if rows + left > most {
+                full = true;
                 break;
             }
             let seq = &self.seqs[other];
@@ -1945,7 +2014,16 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
                 picked.push(other);
             }
         }
-        Ok(picked)
+        Ok(Together::new(picked, rows, ways, most, full))
+    }
+
+    /// The longest any prefilling sequence has waited, for the trace.
+    fn longest_wait(&self) -> u64 {
+        self.prefill_order()
+            .iter()
+            .map(|&(_, index)| self.seqs[index].gather.ticks)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Sequence `index`'s (rows left, lane, target) when its prompt's rest is one bulk chunk

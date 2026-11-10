@@ -56,6 +56,17 @@ mod batch;
 mod bulk;
 #[cfg(feature = "cuda")]
 mod draft;
+// The tick's prefill turn and its gather rule: pure over the scheduler's state, so the tests run
+// it on a fake scheduler.
+#[cfg(feature = "cuda")]
+mod gather;
+
+/// SPARKFLASH_PREFILL_GATHER_TICKS as this rank's scheduler reads it ([`gather::ticks`]): every
+/// rank must use the same value, which the serve control handshake checks.
+#[cfg(feature = "cuda")]
+pub fn prefill_gather_ticks() -> u64 {
+    gather::ticks()
+}
 #[cfg(feature = "cuda")]
 mod lanes;
 #[cfg(feature = "cuda")]
