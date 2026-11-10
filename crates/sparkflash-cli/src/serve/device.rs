@@ -1429,7 +1429,7 @@ pub(super) fn run(
                 Tp4ControlWorker::connect(control, rank, tp4.world_size, TP4_CONTROL_TIMEOUT)
                     .map_err(|error| format!("control connect: {error}"))?;
             worker
-                .handshake()
+                .handshake(prefill_gather_ticks())
                 .map_err(|error| format!("control handshake: {error}"))?;
             // Idle time between requests is not a failure; a closed socket is.
             worker
@@ -1514,8 +1514,13 @@ fn start_leader(
         "sparkflash serve: TP=4 device rank 0/{}: waiting for the workers on control {control}",
         tp4.world_size
     );
-    let hub = Tp4ControlHub::start(control, tp4.world_size, TP4_CONTROL_TIMEOUT)
-        .map_err(|error| format!("rank 0 control channel: {error}"))?;
+    let hub = Tp4ControlHub::start(
+        control,
+        tp4.world_size,
+        TP4_CONTROL_TIMEOUT,
+        prefill_gather_ticks(),
+    )
+    .map_err(|error| format!("rank 0 control channel: {error}"))?;
     watch_workers(&hub)?;
     let control = ControlWriters::start(hub)?;
     let (jobs, queued) = mpsc::sync_channel(DEVICE_JOB_QUEUE);
@@ -1602,6 +1607,20 @@ fn start_leader(
         })
         .map_err(|error| format!("cannot start the HTTP thread: {error}"))?;
     Ok(())
+}
+
+/// This rank's SPARKFLASH_PREFILL_GATHER_TICKS as its device scheduler reads it, which its control
+/// Hello carries so rank 0 can refuse ranks that differ. A build without cuda has no device
+/// scheduler and so no gather rule: 0.
+fn prefill_gather_ticks() -> u64 {
+    #[cfg(feature = "cuda")]
+    {
+        crate::tp4_forward::prefill_gather_ticks()
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        0
+    }
 }
 
 #[cfg(test)]

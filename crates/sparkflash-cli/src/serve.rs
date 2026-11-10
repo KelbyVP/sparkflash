@@ -2101,6 +2101,10 @@ pub enum Tp4ControlFrame {
     Hello {
         /// The worker rank, 1..world_size.
         rank: u32,
+        /// The worker's SPARKFLASH_PREFILL_GATHER_TICKS, as its scheduler reads it: rank 0
+        /// refuses the start when it differs from its own. Absent (an older worker) is 0.
+        #[serde(default)]
+        gather_ticks: u64,
     },
     /// Rank 0 -> worker: every rank has declared ready; requests may start.
     Ready,
@@ -2444,6 +2448,7 @@ impl Tp4ControlHub {
         address: SocketAddr,
         world: usize,
         timeout: Duration,
+        gather_ticks: u64,
     ) -> Result<Self, Tp4ControlError> {
         if world == 0 {
             return Err(Tp4ControlError::BadRank { rank: 0, world });
@@ -2468,7 +2473,7 @@ impl Tp4ControlHub {
                     stream.set_read_timeout(Some(TP4_CONTROL_READ_TIMEOUT))?;
                     stream.set_write_timeout(Some(TP4_CONTROL_READ_TIMEOUT))?;
                     let frame = read_control_frame(&mut stream)?;
-                    let Tp4ControlFrame::Hello { rank } = frame else {
+                    let Tp4ControlFrame::Hello { rank, .. } = frame else {
                         return Err(Tp4ControlError::UnexpectedFrame {
                             expected: "Hello",
                             got: frame,
@@ -2583,12 +2588,15 @@ impl Tp4ControlWorker {
         })
     }
 
-    /// Sends Hello and waits for rank 0's Ready.
-    fn handshake(&mut self) -> Result<(), Tp4ControlError> {
+    /// Sends Hello, with this rank's `gather_ticks`, and waits for rank 0's Ready.
+    fn handshake(&mut self, gather_ticks: u64) -> Result<(), Tp4ControlError> {
         debug_assert!(usize::try_from(self.rank).unwrap_or(usize::MAX) < self.world);
         write_control_frame(
             &mut self.stream,
-            &Tp4ControlFrame::Hello { rank: self.rank },
+            &Tp4ControlFrame::Hello {
+                rank: self.rank,
+                gather_ticks,
+            },
         )?;
         let frame = read_control_frame(&mut self.stream)?;
         match frame {
@@ -5344,10 +5352,12 @@ fn tp4_engine_thread(
         .map_err(|error| format!("rank {}: {error}", rank_config.rank))
         .and_then(|rank| {
             log_tp4_metrics(rank_config.rank, "open", &rank.metrics());
+            // This path runs no device scheduler, so it has no gather rule to agree on.
             let hub = Tp4ControlHub::start(
                 rank_config.control_address(),
                 rank_config.world_size,
                 rank_config.timeout,
+                0,
             )
             .map_err(|error| format!("rank 0 control channel: {error}"))?;
             let tokenizer = load_tokenizer(&spec.tokenizer)?;
@@ -5747,8 +5757,9 @@ fn tp4_control_worker(rank_config: &Tp4RankConfig) -> Result<Tp4ControlWorker, S
         rank_config.timeout,
     )
     .map_err(|error| format!("rank {} control connect: {error}", rank_config.rank))?;
+    // This path runs no device scheduler, so it has no gather rule to agree on.
     control
-        .handshake()
+        .handshake(0)
         .map_err(|error| format!("rank {} control handshake: {error}", rank_config.rank))?;
     Ok(control)
 }
@@ -11505,7 +11516,10 @@ mod tp4_serve_tests {
     #[test]
     fn control_frames_round_trip_on_a_loopback_socket() {
         let frames = vec![
-            Tp4ControlFrame::Hello { rank: 1 },
+            Tp4ControlFrame::Hello {
+                rank: 1,
+                gather_ticks: 2,
+            },
             Tp4ControlFrame::Ready,
             Tp4ControlFrame::Request {
                 prompt_ids: vec![1, 2, 3],
@@ -11637,7 +11651,7 @@ mod tp4_serve_tests {
             let mut control =
                 Tp4ControlWorker::connect(control_address, 1, 2, Duration::from_secs(10))
                     .expect("worker connect");
-            control.handshake().expect("handshake");
+            control.handshake(0).expect("handshake");
             let mut requests = Vec::new();
             while let Ok(frame) = control.next_frame() {
                 match frame {
@@ -11664,7 +11678,7 @@ mod tp4_serve_tests {
             }
             requests
         });
-        let mut hub = Tp4ControlHub::start(address, 2, Duration::from_secs(10)).expect("hub");
+        let mut hub = Tp4ControlHub::start(address, 2, Duration::from_secs(10), 0).expect("hub");
         let (replies, mut answers) = tokio::sync::mpsc::channel(REPLY_BUFFER);
         let job = Job {
             prompt_tokens: prompt.clone(),
@@ -11789,7 +11803,7 @@ mod tp4_serve_tests {
         let worker = thread::spawn(move || {
             let mut control = Tp4ControlWorker::connect(address, 1, 2, Duration::from_secs(10))
                 .expect("worker connect");
-            control.handshake().expect("handshake");
+            control.handshake(0).expect("handshake");
             let (mut speculative, mut tokens) = (None, Vec::new());
             while let Ok(frame) = control.next_frame() {
                 match frame {
@@ -11803,7 +11817,7 @@ mod tp4_serve_tests {
             }
             (speculative, tokens)
         });
-        let mut hub = Tp4ControlHub::start(address, 2, Duration::from_secs(10)).expect("hub");
+        let mut hub = Tp4ControlHub::start(address, 2, Duration::from_secs(10), 0).expect("hub");
         let (replies, mut answers) = tokio::sync::mpsc::channel(REPLY_BUFFER);
         let job = Job {
             prompt_tokens: vec![100, 200],
@@ -11934,6 +11948,7 @@ mod tp4_serve_tests {
             SocketAddr::from(([127, 0, 0, 1], 0)),
             2,
             Duration::from_millis(80),
+            0,
         )
         .expect_err("a missing rank cannot complete the group");
         match error {
@@ -11950,6 +11965,80 @@ mod tp4_serve_tests {
         }
     }
 
+    /// Rank 0 and a worker, each with its own gather ticks, over a loopback control channel:
+    /// rank 0's start and the worker's handshake.
+    fn start_with_gather_ticks(
+        hub_ticks: u64,
+        worker_ticks: u64,
+    ) -> (
+        Result<Tp4ControlHub, Tp4ControlError>,
+        Result<(), Tp4ControlError>,
+    ) {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("probe listener");
+        let address = probe.local_addr().expect("probe address");
+        drop(probe);
+        let worker = thread::spawn(move || {
+            let mut control = Tp4ControlWorker::connect(address, 1, 2, Duration::from_secs(10))
+                .expect("worker connect");
+            control.handshake(worker_ticks)
+        });
+        let hub = Tp4ControlHub::start(address, 2, Duration::from_secs(10), hub_ticks);
+        (hub, worker.join().expect("the worker joins"))
+    }
+
+    #[test]
+    fn ranks_that_disagree_on_the_gather_ticks_refuse_to_start() {
+        let (hub, worker) = start_with_gather_ticks(0, 2);
+        let error = match hub {
+            Ok(_) => panic!(
+                "rank 0 started a group whose rank 1 has SPARKFLASH_PREFILL_GATHER_TICKS=2 beside its own 0"
+            ),
+            Err(error) => error.to_string(),
+        };
+        for part in [
+            "SPARKFLASH_PREFILL_GATHER_TICKS",
+            "rank 1",
+            "=2",
+            "rank 0",
+            "=0",
+        ] {
+            assert!(error.contains(part), "{part:?} missing from: {error}");
+        }
+        let error = worker
+            .expect_err("the worker must not start either")
+            .to_string();
+        assert!(
+            error.contains("SPARKFLASH_PREFILL_GATHER_TICKS"),
+            "the worker's refusal must say why: {error}"
+        );
+    }
+
+    #[test]
+    fn ranks_that_agree_on_the_gather_ticks_start() {
+        for ticks in [0, 2] {
+            let (hub, worker) = start_with_gather_ticks(ticks, ticks);
+            assert!(hub.is_ok_and(|hub| hub.ready), "rank 0 at {ticks}");
+            worker.unwrap_or_else(|error| panic!("rank 1 at {ticks}: {error}"));
+        }
+    }
+
+    #[test]
+    fn an_older_worker_s_hello_reads_as_no_gather_ticks() {
+        let frame = Tp4ControlFrame::Hello {
+            rank: 1,
+            gather_ticks: 0,
+        };
+        let mut json = serde_json::to_value(&frame).expect("encode");
+        let fields = json
+            .as_object_mut()
+            .and_then(|outer| outer.values_mut().next())
+            .and_then(|hello| hello.as_object_mut())
+            .expect("Hello is an object with its fields");
+        assert!(fields.remove("gather_ticks").is_some(), "{fields:?}");
+        let decoded: Tp4ControlFrame = serde_json::from_value(json).expect("decode");
+        assert_eq!(decoded, frame);
+    }
+
     #[test]
     fn worker_control_connect_retries_until_the_hub_binds() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
@@ -11964,7 +12053,7 @@ mod tp4_serve_tests {
             let (mut stream, _) = listener.accept().expect("the retried worker connects");
             let frame = read_control_frame(&mut stream).expect("read the worker Hello");
             assert!(
-                matches!(frame, Tp4ControlFrame::Hello { rank: 1 }),
+                matches!(frame, Tp4ControlFrame::Hello { rank: 1, .. }),
                 "{frame:?}"
             );
             write_control_frame(&mut stream, &Tp4ControlFrame::Ready).expect("send Ready");
@@ -11972,7 +12061,7 @@ mod tp4_serve_tests {
         let mut worker = Tp4ControlWorker::connect(address, 1, 2, Duration::from_secs(5))
             .expect("the connect retries until the hub is listening");
         worker
-            .handshake()
+            .handshake(0)
             .expect("the retried connection handshakes");
         assert!(worker.ready);
         server.join().expect("the test hub joins");

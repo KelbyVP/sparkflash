@@ -60,6 +60,13 @@ mod draft;
 // it on a fake scheduler.
 #[cfg(feature = "cuda")]
 mod gather;
+
+/// SPARKFLASH_PREFILL_GATHER_TICKS as this rank's scheduler reads it ([`gather::ticks`]): every
+/// rank must use the same value, which the serve control handshake checks.
+#[cfg(feature = "cuda")]
+pub fn prefill_gather_ticks() -> u64 {
+    gather::ticks()
+}
 #[cfg(feature = "cuda")]
 mod lanes;
 #[cfg(feature = "cuda")]
