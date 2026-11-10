@@ -33,7 +33,10 @@
 //!    their own but a window, which rebuilds over those last rows, so the logits, the drafter's
 //!    seeds and the windows decode reads are the full run's. A lane holding such skipped rows
 //!    resumes past them only where its windows are whole, else backs up into the new prompt's
-//!    last [`DECODER_WARM`] rows (SPARKFLASH_PREFILL_DECODER_SKIP=0 runs every layer);
+//!    last [`DECODER_WARM`] rows (SPARKFLASH_PREFILL_DECODER_SKIP=0 runs every layer). Short
+//!    rests that are one chunk each run together on the bulk rows states ([`Batch::together`]);
+//!    with SPARKFLASH_PREFILL_GATHER_TICKS=N a short rest may wait up to N ticks beside the
+//!    decoders for more to join it ([`gather_holds`]);
 //! 3. runs one decode step over every decoding sequence. A lone sequence takes the speculative
 //!    step (draft, verify, accept); up to thirty-two (R_MAX / 2) take one speculative step together
 //!    (each drafts, in passes of up to sixteen, and the step's R_MAX rows go to the anchors and then
@@ -100,6 +103,51 @@ fn busy_exact_steps() -> usize {
         .and_then(|value| value.parse().ok())
         .unwrap_or(1usize)
         .max(1)
+}
+
+/// The most ticks in a row a short prefill waits beside the decoders for more short prompts to
+/// share its bulk tick (SPARKFLASH_PREFILL_GATHER_TICKS, default 0: never). A bulk tick costs a
+/// fixed part (every expert's weights read, about a quarter second) plus its rows, whether it
+/// carries one prompt or three, and it stalls every decoder for its whole length: two short
+/// prompts that share a tick save the decoders one fixed part. The rule is text-generation-
+/// inference's `max_waiting_tokens` (the decode steps a waiting request may be held so others
+/// join its prefill) counted in this scheduler's ticks, which every rank runs alike, so the
+/// ranks need no clock of their own to agree.
+fn gather_ticks() -> u64 {
+    gather_ticks_from(
+        std::env::var("SPARKFLASH_PREFILL_GATHER_TICKS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// [`gather_ticks`] from the variable's value: a tick count, else 0.
+fn gather_ticks_from(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Whether a tick holds its short prefill back so more short prompts can join it: `rests` are
+/// the rows left of the prefilling sequences whose rest is one chunk ([`Batch::whole_chunk`]), in
+/// the order [`Batch::together`] takes them (the lead first). It holds while the tick it would run
+/// still has room for another such rest (a bulk rows state of the `ways`, and more than R_MAX of
+/// its `most` rows) and it has held fewer than `gather_ticks` ticks in a row (`held`). A tick that
+/// is full, or that has waited its ticks, runs.
+fn gather_holds(rests: &[usize], ways: usize, most: usize, held: u64, gather_ticks: u64) -> bool {
+    if rests.is_empty() || ways < 2 || held >= gather_ticks {
+        return false;
+    }
+    let (mut rows, mut count) = (0usize, 0usize);
+    for &left in rests {
+        if count == ways || rows + left > most {
+            return false;
+        }
+        rows += left;
+        count += 1;
+    }
+    // Another rest takes more than R_MAX rows ([`Batch::whole_chunk`]).
+    count < ways && rows + R_MAX < most
 }
 
 /// D7's encoder, layers 0..=20. They write every cache a row reads past its window (the compressed
@@ -464,6 +512,10 @@ pub(super) struct Batch<'b, 'a, 'r> {
     decoder_skip: bool,
     busy_chunk: usize,
     busy_exact_steps: usize,
+    /// The most ticks in a row a short prefill waits for others to join it ([`gather_ticks`]).
+    gather_ticks: u64,
+    /// The ticks in a row [`Self::gather_hold`] has held a short prefill back.
+    gathered: u64,
     /// The shared speculative step's draft floor ([`batch_spec_floor`]); None: the plain step.
     spec_floor: Option<f64>,
     share: DecodeShare,
@@ -533,6 +585,8 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
             decoder_skip: std::env::var("SPARKFLASH_PREFILL_DECODER_SKIP").as_deref() != Ok("0"),
             busy_chunk: busy_chunk(),
             busy_exact_steps: busy_exact_steps(),
+            gather_ticks: gather_ticks(),
+            gathered: 0,
             spec_floor: batch_spec_floor(),
             share: DecodeShare::from_env(),
             chunk_ms: 0.0,
@@ -825,7 +879,11 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         let decoding = self.decoding();
         let mut prefilled = None;
         let mut long_chunk = None;
-        if let Some(&(_, index)) = self.prefill_order().first() {
+        let first = self.prefill_order().first().copied();
+        if first.is_none() {
+            self.gathered = 0;
+        }
+        if let Some((_, index)) = first {
             // The rows another lane holds are copied, not run (prefill's own adopt then finds
             // nothing more): the clock below counts only the rows the chunk computes.
             self.adopt(index)?;
@@ -836,7 +894,12 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
             };
             // Every rank takes the same branch: the rows left and `decoding` are the scheduler's
             // state, and `hold` is rank 0's.
-            if !(hold && decoding && left > SHARE_MIN_ROWS) {
+            let run = !(hold && decoding && left > SHARE_MIN_ROWS);
+            if run && self.gather_hold(index, decoding) {
+                // Every rank holds alike: the rule reads only the scheduler's state.
+                self.gathered += 1;
+            } else if run {
+                self.gathered = 0;
                 let from = self.seqs[index].pos;
                 let together = self.together(index, decoding)?;
                 if together.len() > 1 {
@@ -870,10 +933,11 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         if self.trace {
             let (held, budget) = self.device.lane_memory();
             println!(
-                "batch: tick {} seqs {} prefill {prefilled:?} {prefill_ms:.1} ms (reads {:.1} ms) decode {batch} rows {:.1} ms lanes {} of {} MiB",
+                "batch: tick {} seqs {} prefill {prefilled:?} {prefill_ms:.1} ms (reads {:.1} ms) gathered {} decode {batch} rows {:.1} ms lanes {} of {} MiB",
                 self.ticks,
                 self.seqs.len(),
                 self.read_wait_ms,
+                self.gathered,
                 started.elapsed().as_secs_f64() * 1e3 - prefill_ms,
                 held >> 20,
                 budget >> 20,
@@ -1948,6 +2012,38 @@ impl<'b, 'a, 'r> Batch<'b, 'a, 'r> {
         Ok(picked)
     }
 
+    /// Whether this tick holds sequence `index`'s prefill (the next in [`Self::prefill_order`])
+    /// back for more short prompts to join it ([`gather_holds`]): only while sequences decode
+    /// (nothing else stalls for a prefill), only when its rest is one chunk, and only where
+    /// [`Self::together`] could join another to it. Every rank answers alike.
+    fn gather_hold(&self, index: usize, decoding: bool) -> bool {
+        let ways = 1 + self.inputs.bulk_more.len();
+        if self.gather_ticks == 0
+            || !decoding
+            || ways == 1
+            || !self.attached
+            || !self.device.bulk_comm_open()
+            || self.prefill_next.is_some()
+            || self.prefill_more.iter().any(Option::is_some)
+        {
+            return false;
+        }
+        let (budget, _) = self.bulk_budget(decoding);
+        let Some((lead, ..)) = self.whole_chunk(index, budget) else {
+            return false;
+        };
+        let mut rests = vec![lead];
+        for (_, other) in self.prefill_order() {
+            if other == index {
+                continue;
+            }
+            if let Some((left, ..)) = self.whole_chunk(other, budget) {
+                rests.push(left);
+            }
+        }
+        gather_holds(&rests, ways, budget, self.gathered, self.gather_ticks)
+    }
+
     /// Sequence `index`'s (rows left, lane, target) when its prompt's rest is one bulk chunk
     /// however its tick runs it: more than R_MAX rows, at most `budget`, and too few to split off
     /// the decoder's ([`bulk_rows`]); with a lane and no images.
@@ -2850,7 +2946,8 @@ impl Drop for Batch<'_, '_, '_> {
 mod tests {
     use super::{
         DECODER_WARM, DecodeShare, ENCODER_LAYERS, R_MAX, bulk_rows, common_prefix,
-        constraint_refusal, decoder_resume, runs_decoder, share_rows, skip_end_after,
+        constraint_refusal, decoder_resume, gather_holds, gather_ticks_from, runs_decoder,
+        share_rows, skip_end_after,
     };
     use sparkflash_api::constrained::TokenConstraint;
     use sparkflash_api::vocab::TokenBytes;
@@ -2874,6 +2971,54 @@ mod tests {
         assert!(error.is_some_and(|error| error.contains("token 2 leaves the schema")));
         assert_eq!(constraint_refusal(&mut constraint, (1, 0.0)), None);
         assert!(constraint.is_complete());
+    }
+
+    #[test]
+    fn the_gather_rule_is_off_unless_a_tick_count_is_set() {
+        assert_eq!(gather_ticks_from(None), 0);
+        assert_eq!(gather_ticks_from(Some("")), 0);
+        assert_eq!(gather_ticks_from(Some("two")), 0);
+        assert_eq!(gather_ticks_from(Some("-1")), 0);
+        assert_eq!(gather_ticks_from(Some("2")), 2);
+        assert_eq!(gather_ticks_from(Some(" 3 ")), 3);
+        // Off, nothing is held whatever is waiting.
+        assert!(!gather_holds(&[450], 3, 2048, 0, 0));
+    }
+
+    #[test]
+    fn a_lone_short_prefill_waits_its_ticks_for_company_then_runs() {
+        // One 450-row rest, three bulk rows states, a 2,048-row busy chunk, two ticks to wait.
+        assert!(gather_holds(&[450], 3, 2048, 0, 2));
+        assert!(gather_holds(&[450], 3, 2048, 1, 2));
+        assert!(!gather_holds(&[450], 3, 2048, 2, 2));
+        // Two rests still leave a state and rows for a third.
+        assert!(gather_holds(&[450, 470], 3, 2048, 0, 2));
+    }
+
+    #[test]
+    fn a_full_tick_runs_at_once() {
+        // Every bulk rows state taken.
+        assert!(!gather_holds(&[300, 400, 500], 3, 2048, 0, 8));
+        assert!(!gather_holds(&[300, 400, 500, 600], 3, 2048, 0, 8));
+        // The next rest does not fit the tick's rows.
+        assert!(!gather_holds(&[1200, 900], 3, 2048, 0, 8));
+        // The lead alone fills the rows, or leaves too few for another rest of more than R_MAX.
+        assert!(!gather_holds(&[2048], 3, 2048, 0, 8));
+        assert!(!gather_holds(&[2048 - R_MAX], 3, 2048, 0, 8));
+        assert!(gather_holds(&[2048 - R_MAX - 1], 3, 2048, 0, 8));
+        // A bigger budget leaves room, so the same rests wait.
+        assert!(gather_holds(&[1200, 900], 4, 4096, 0, 8));
+        // More rows states are room too: no count is fixed here.
+        assert!(gather_holds(&[300, 400, 500], 4, 2048, 0, 8));
+        assert!(!gather_holds(&[300, 400, 500, 600], 4, 2048, 0, 8));
+    }
+
+    #[test]
+    fn nothing_waits_where_prompts_cannot_share_a_tick() {
+        // One bulk rows state (SPARKFLASH_PREFILL_WAYS=1): a wait would gain nothing.
+        assert!(!gather_holds(&[450], 1, 2048, 0, 8));
+        // No short rest prefilling.
+        assert!(!gather_holds(&[], 3, 2048, 0, 8));
     }
 
     #[test]
