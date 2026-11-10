@@ -42,9 +42,9 @@ const VAR: &str = "SPARKFLASH_PREFILL_GATHER_TICKS";
 
 /// The most ticks a short prompt waits beside the decoders for more to share its bulk tick
 /// (SPARKFLASH_PREFILL_GATHER_TICKS, default 0: never). Read once a process: a value that is not a
-/// tick count is logged once and leaves the rule off, and a set count is logged once, so a rank
-/// whose value differs shows in its log (every rank must use the same value, or the ranks hold
-/// differently and their collectives desynchronise).
+/// tick count is logged once and leaves the rule off, and a set count is logged once. Every rank
+/// must use the same value, or the ranks hold differently and their collectives desynchronise:
+/// each rank's control Hello carries this value, and rank 0 refuses to start a group that differs.
 pub(super) fn ticks() -> u64 {
     static TICKS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *TICKS.get_or_init(|| match ticks_from(std::env::var(VAR).ok().as_deref()) {

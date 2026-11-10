@@ -2282,6 +2282,21 @@ pub enum Tp4ControlError {
         /// The declared payload length.
         bytes: usize,
     },
+    /// A worker's SPARKFLASH_PREFILL_GATHER_TICKS differs from rank 0's: the ranks would hold
+    /// prefills differently and desynchronise, so the group does not start.
+    GatherTicksMismatch {
+        /// The worker's rank.
+        rank: u32,
+        /// The worker's value.
+        theirs: u64,
+        /// Rank 0's value.
+        ours: u64,
+    },
+    /// Rank 0 sent Error instead of Ready: it refused the start.
+    Refused {
+        /// Rank 0's message.
+        message: String,
+    },
 }
 
 #[cfg(feature = "tp4-serve")]
@@ -2315,6 +2330,11 @@ impl std::fmt::Display for Tp4ControlError {
             Self::FrameTooLarge { bytes } => {
                 write!(f, "control frame declares {bytes} bytes, above the cap")
             }
+            Self::GatherTicksMismatch { rank, theirs, ours } => write!(
+                f,
+                "rank {rank} has SPARKFLASH_PREFILL_GATHER_TICKS={theirs} but rank 0 has SPARKFLASH_PREFILL_GATHER_TICKS={ours}; every rank must use the same value (ranks that hold prefills differently desynchronise), so the group refuses to start"
+            ),
+            Self::Refused { message } => write!(f, "rank 0 refused the start: {message}"),
         }
     }
 }
@@ -2438,7 +2458,8 @@ struct Tp4ControlHub {
 
 #[cfg(feature = "tp4-serve")]
 impl Tp4ControlHub {
-    /// Binds the control listener and waits for every worker's Hello.
+    /// Binds the control listener and waits for every worker's Hello. A worker whose Hello names
+    /// gather ticks other than `gather_ticks` (rank 0's) is sent Error and refuses the start.
     ///
     /// The acceptance loop uses a non-blocking listener plus a deadline so a missing rank is a
     /// typed error with the count that joined, not an indefinite accept. Ready is sent only after
@@ -2473,7 +2494,11 @@ impl Tp4ControlHub {
                     stream.set_read_timeout(Some(TP4_CONTROL_READ_TIMEOUT))?;
                     stream.set_write_timeout(Some(TP4_CONTROL_READ_TIMEOUT))?;
                     let frame = read_control_frame(&mut stream)?;
-                    let Tp4ControlFrame::Hello { rank, .. } = frame else {
+                    let Tp4ControlFrame::Hello {
+                        rank,
+                        gather_ticks: theirs,
+                    } = frame
+                    else {
                         return Err(Tp4ControlError::UnexpectedFrame {
                             expected: "Hello",
                             got: frame,
@@ -2485,6 +2510,22 @@ impl Tp4ControlHub {
                             rank: u32::try_from(rank).unwrap_or(u32::MAX),
                             world,
                         });
+                    }
+                    if theirs != gather_ticks {
+                        let error = Tp4ControlError::GatherTicksMismatch {
+                            rank: u32::try_from(rank).unwrap_or(u32::MAX),
+                            theirs,
+                            ours: gather_ticks,
+                        };
+                        // Best effort: the worker logs why, then exits as on any refused start.
+                        let _ = write_control_frame(
+                            &mut stream,
+                            &Tp4ControlFrame::Error {
+                                code: "gather_ticks_mismatch".to_owned(),
+                                message: error.to_string(),
+                            },
+                        );
+                        return Err(error);
                     }
                     streams[rank] = Some(stream);
                     joined += 1;
@@ -2604,6 +2645,7 @@ impl Tp4ControlWorker {
                 self.ready = true;
                 Ok(())
             }
+            Tp4ControlFrame::Error { message, .. } => Err(Tp4ControlError::Refused { message }),
             other => Err(Tp4ControlError::UnexpectedFrame {
                 expected: "Ready",
                 got: other,
