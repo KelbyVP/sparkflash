@@ -17,8 +17,11 @@
 It replays the scheduler's tick (super::batch::Batch::tick): placements, at most one prefill
 tick (the fewest rows left first; `together` joins the next whole-chunk rests while a bulk rows
 state is left and the rows fit the busy chunk), then one decode step over every decoding
-sequence. A prefill tick stalls every decoder for its whole length. The gather rule holds a short
-lead back for up to N ticks while decoders run, unless the short rests already fill a tick.
+sequence. A prefill tick stalls every decoder for its whole length. The gather rule
+(super::gather::prefill_turn) holds a short lead back while decoders run, unless the short rests
+it can take already fill a tick, any prefilling prompt has waited N ticks of its own, or a long
+prompt (or one split over ticks) is prefilling; the tick after a hold takes the prompts that have
+waited N first. The DecodeShare spacing of long chunks is not modelled (it only defers them more).
 
 The costs are measured, not assumed (rank0.log, 2026-11-09 19:40-20:43 PT, 3,261 bulk prompts):
   * a bulk prefill tick of R rows costs F + A*R ms whether it carries one prompt or several
@@ -74,6 +77,9 @@ class Client:
         rng = self.rng
         if self.kind == "curation":
             return max(1, draw(rng, U_HIST, 50)), max(2, draw(rng, G_HIST, 10)), 2.38
+        if self.kind == "long":
+            # A cold 32k-token prompt (a long document or a fresh agent transcript), a short answer.
+            return 32768, 200, 2.38
         if self.kind == "agent":
             # A library-building / agent turn: a cached transcript plus a short new rest, a long answer.
             return int(rng.lognormvariate(6.3, 0.8)), int(rng.lognormvariate(6.2, 0.6)), 3.0
@@ -91,10 +97,10 @@ def simulate(clients, gather_ticks, seconds, seed, busy_chunk=BUSY_CHUNK, ways=W
     seqs = []  # dicts
     done = []
     group_sizes = []
+    held_ticks = 0
     prefill_ms_total = 0.0
     decode_ms_total = 0.0
     gen_tokens = 0
-    gathered = 0  # the ticks in a row the rule has held a short prefill (Batch::gathered)
     horizon = seconds * 1000.0
     while t < horizon:
         tick += 1
@@ -104,17 +110,15 @@ def simulate(clients, gather_ticks, seconds, seed, busy_chunk=BUSY_CHUNK, ways=W
             if when <= t:
                 u, g, tps = clients[ci].request()
                 seqs.append(dict(client=ci, kind=clients[ci].kind, arr=when, left=u, u=u, g=g,
-                                 tps=tps, emitted=0.0, phase="prefill", placed=tick, ttft=None))
+                                 tps=tps, emitted=0.0, phase="prefill", placed=tick, ttft=None,
+                                 wait=0, split=False))
             else:
                 still.append((when, ci))
         arrivals = still
         decoding = [s for s in seqs if s["phase"] == "decode"]
         pending = sorted((s for s in seqs if s["phase"] == "prefill"), key=lambda s: (s["left"], s["arr"]))
         cost = 0.0
-        if not pending:
-            gathered = 0
         if pending:
-            lead = pending[0]
             budget = busy_chunk if decoding else 4096
             most_rows = budget if decoding else budget * ways
             whole_most = min(budget, DECODER_WARM + R_MAX)
@@ -122,43 +126,42 @@ def simulate(clients, gather_ticks, seconds, seed, busy_chunk=BUSY_CHUNK, ways=W
             def whole(s):
                 return R_MAX < s["left"] <= whole_most and s["left"] >= BULK_MIN
 
-            hold = False
-            if gather_ticks > 0 and decoding and whole(lead):
-                short = [s for s in pending if whole(s)]
-                rows, count = 0, 0
-                for s in short:
-                    if count == ways or rows + s["left"] > most_rows:
+            if gather_ticks > 0:
+                # The prompts that have waited their ticks go first (gather::lead_order).
+                pending.sort(key=lambda s: not (whole(s) and not s["split"] and s["wait"] >= gather_ticks))
+            lead = pending[0]
+            # together: the lead and the next whole rests while a rows state and the rows last.
+            group, rows, full = [], 0, False
+            if whole(lead):
+                group, rows = [lead], lead["left"]
+                for s in pending[1:]:
+                    if len(group) == ways:
                         break
+                    if not whole(s):
+                        continue
+                    if rows + s["left"] > most_rows:
+                        full = True
+                        break
+                    group.append(s)
                     rows += s["left"]
-                    count += 1
-                full = count >= ways or count < len(short) or rows + R_MAX >= most_rows
-                hold = not full and gathered < gather_ticks
+            room = bool(group) and not full and len(group) < ways and rows + R_MAX < most_rows
+            hold = (gather_ticks > 0 and bool(decoding) and room
+                    and all(whole(s) and not s["split"] and s["wait"] < gather_ticks for s in pending))
             if hold:
-                gathered += 1
+                held_ticks += 1
             else:
-                gathered = 0
                 if lead["left"] < BULK_MIN:
                     ran = [lead]
                     cost = EXACT_ROW_MS * lead["left"]
-                elif whole(lead):
-                    ran, rows = [lead], lead["left"]
-                    for s in pending[1:]:
-                        if len(ran) == ways:
-                            break
-                        if not whole(s):
-                            continue
-                        if rows + s["left"] > most_rows:
-                            break
-                        ran.append(s)
-                        rows += s["left"]
+                elif group:
+                    ran = group
                     cost = f_ms + a_ms * rows
                 else:
                     n = min(lead["left"], budget)
                     lead["left"] -= n
                     cost = f_ms + a_ms * n
                     ran = [] if lead["left"] > 0 else [lead]
-                    if lead["left"] == 0:
-                        lead["left"] = 0
+                    lead["split"] = lead["left"] > 0
                 for s in ran:
                     s["left"] = 0
                     s["phase"] = "decode"
@@ -166,6 +169,9 @@ def simulate(clients, gather_ticks, seconds, seed, busy_chunk=BUSY_CHUNK, ways=W
                     s["emitted"] = 1.0
                 if ran or cost:
                     group_sizes.append(len(ran) if len(ran) > 0 else 1)
+            for s in pending:
+                if s["phase"] == "prefill":
+                    s["wait"] += 1
         prefill_ms_total += cost
         decoding = [s for s in seqs if s["phase"] == "decode"]
         step = d0_ms + d1_ms * len(decoding) if decoding else 0.0
@@ -203,7 +209,8 @@ def simulate(clients, gather_ticks, seconds, seed, busy_chunk=BUSY_CHUNK, ways=W
             per_req_tok_s=statistics.mean((s["g"] - 1) / max(1e-9, (s["end"] - s["arr"] - s["ttft"]) / 1000.0) for s in rows),
         )
     out["all"] = dict(gen_s=gen_tokens / (t / 1000.0), prefill_share=prefill_ms_total / t,
-                      groups={k: group_sizes.count(k) for k in sorted(set(group_sizes))})
+                      groups={k: group_sizes.count(k) for k in sorted(set(group_sizes))},
+                      held=held_ticks / tick)
     return out
 
 
@@ -213,6 +220,8 @@ SCENARIOS = {
     "curation8+agent6": lambda: [Client("curation", None, 1800.0) for _ in range(8)] + [Client("agent", None, 2000.0) for _ in range(6)],
     "agents12 (library-building)": lambda: [Client("agent", None, 2000.0) for _ in range(12)],
     "agents3 (light)": lambda: [Client("agent", None, 5000.0) for _ in range(3)],
+    # Tonight's mix plus a cold 32k-token prompt about every 70 s (one client, 60 s think time).
+    "tonight + 32k prompts": lambda: [Client("curation", None, 1800.0) for _ in range(8)] + [Client("agent", None, 2000.0) for _ in range(4)] + [Client("long", None, 60000.0)],
     "curation16": lambda: [Client("curation", None, 1800.0) for _ in range(16)],
 }
 
@@ -246,7 +255,7 @@ def main():
             line = f"  gather={g:<2} gen {gen:6.1f} tok/s ({100*(gen/base-1):+5.1f}%)  prefill share {100*avg('all','prefill_share'):4.1f}%  ticks by size " + \
                    " ".join(f"{k}:{100*v/tot:.0f}%" for k, v in sorted(groups.items()))
             print(line)
-            for kind in ("curation", "agent"):
+            for kind in ("curation", "agent", "long"):
                 if any(kind in r for r in runs):
                     print(f"      {kind:8} {avg(kind,'req_s'):5.3f} req/s  ttft p50 {avg(kind,'ttft_p50'):5.0f} p95 {avg(kind,'ttft_p95'):5.0f} ms  latency {avg(kind,'latency'):5.2f} s  per-request {avg(kind,'per_req_tok_s'):5.1f} tok/s")
 

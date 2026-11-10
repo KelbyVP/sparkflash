@@ -126,7 +126,8 @@ Short and cached prompts take the exact rows path. Long uncached prompts take th
   layer by layer as a long prompt's chunks are. Eight uncached 800-token prompts arriving at once
   prefill in five ticks instead of eight, and each prompt's results are the ones it gets alone.
   With `SPARKFLASH_PREFILL_GATHER_TICKS=N` (default 0) a short prompt that arrives while others
-  decode may wait up to N ticks for more to share its tick, unless the tick is already full.
+  decode may wait up to N ticks of its own for more to share its tick, unless the tick is already
+  full; no tick holds while a long prompt is prefilling.
 - Context up to 1,048,576 tokens per sequence.
 - The HTTP surface (OpenAI chat/completions/responses, Anthropic messages, tokenize/detokenize,
   metrics) is described in [serving.md](serving.md).

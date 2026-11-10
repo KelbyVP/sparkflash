@@ -56,6 +56,10 @@ mod batch;
 mod bulk;
 #[cfg(feature = "cuda")]
 mod draft;
+// The tick's prefill turn and its gather rule: pure over the scheduler's state, so the tests run
+// it on a fake scheduler.
+#[cfg(feature = "cuda")]
+mod gather;
 #[cfg(feature = "cuda")]
 mod lanes;
 #[cfg(feature = "cuda")]
